@@ -31,6 +31,14 @@
 - `timeoutMs`
 - `maxOutputBytes`
 
+同时建议引入：
+
+- `workingDirectory`
+- `cancellationToken`
+- `expectedCompletionContract`
+- `heartbeatTimeoutMs`
+- `gracefulShutdownMs`
+
 ### 2.3 统一输出
 
 - `status`
@@ -40,6 +48,38 @@
 - `commits`
 - `rawLogs`
 - `parseStatus`
+- `completionSignal`
+- `heartbeatCount`
+- `resourceUsage`
+- `pid`
+
+### 2.3.1 统一执行生命周期
+
+Looper 不应只抽象“调用 agent 并拿结果”，还应抽象整个运行期：
+
+```ts
+interface AgentExecution {
+  pid: number
+  startedAt: string
+  status: 'running' | 'completed' | 'failed' | 'timeout' | 'killed'
+  wait(): Promise<AgentResult>
+  kill(reason: string): Promise<void>
+}
+
+interface AgentExecutor {
+  start(input: AgentRunInput): Promise<AgentExecution>
+}
+```
+
+标准生命周期：
+
+1. spawn child process
+2. 记录 pid / runId / loopId
+3. 流式消费 stdout / stderr
+4. 产生活跃 heartbeat
+5. 检测 completion contract
+6. 超时或取消时执行 `SIGTERM -> grace period -> SIGKILL`
+7. 解析结果并落盘
 
 ### 2.4 执行约束
 
@@ -47,12 +87,31 @@
 - 必须限制 `stdout/stderr` 缓冲上限，避免长输出打满内存或磁盘
 - 子进程应可被统一清理；`looperd stop` 时必须回收仍在运行的 agent 子进程
 - 对写文件型 agent，必须绑定 worktree / cwd，不允许漂移到未知目录
+- 必须记录 agent pid，供 `looperd` 崩溃恢复后查杀 orphan process
+- 必须支持活跃心跳与 inactivity timeout，避免 agent 假死长期占坑
+
+### 2.4.1 完成信号契约
+
+参考 open-ralph-wiggum，建议 Looper 为 agent 输出定义统一 completion contract，而不是完全依赖自然语言总结。
+
+可选方案：
+
+- 结构化 JSON 结束块
+- 明确 terminal marker
+- 指定 artifact 文件落地
+
+要求：
+
+- `parse_failed` 时保留原始 completion payload
+- 不允许在 `parse_failed` 后自动重放有副作用步骤
+- 必须允许人工查看原始结果并手动恢复
 
 ### 2.5 解析失败降级策略
 
 当 agent 未按预期返回结构化结果时：
 
 - 保存 `rawLogs`
+- 保存 `completion payload`
 - run 标记为 `parse_failed`
 - 不自动重放副作用步骤
 - 只允许从解析检查点重试
@@ -79,7 +138,19 @@ interface ResolvedAgentProfile {
 }
 ```
 
-更详细的持久化与参数矩阵见：[`./agent-config.md`](./agent-config.md)
+MVP 阶段直接读取 `config.md` 中的单一 `AgentConfig`；更复杂的 profile/binding 设计后置到 [`./agent-config.md`](./agent-config.md)。
+
+### 2.8 预算与观测
+
+agent 执行至少记录：
+
+- 预估 token / cost
+- wall time
+- 输出字节数
+- tool / command 次数（如果 agent 可观测）
+- 最后一次 heartbeat 时间
+
+这些数据既用于成本控制，也用于检测 stuck / struggling loops。
 
 ---
 

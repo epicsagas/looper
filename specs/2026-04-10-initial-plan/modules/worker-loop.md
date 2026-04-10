@@ -100,3 +100,34 @@
 - worktree 创建失败：终止 task
 - validate 失败：记录失败并等待下一次 fixer/worker 继续
 - 创建 PR 失败：保留 worktree，允许重试
+
+---
+
+## 7. 接入共享 LoopRunner
+
+Worker 通过 `LoopRunner<WorkerStep>` 执行，step handler 映射建议：
+
+- `prepare-task` → `PrepareTaskStep`
+- `prepare-worktree` → `PrepareWorktreeStep`
+- `plan-step` → `PlanChecklistSliceStep`
+- `execute-step` → `InvokeWorkerAgentStep`
+- `validate-step` → `ValidateChecklistSliceStep`
+- `sync-checklist` → `SyncChecklistStep`
+- `open-pr` → `OpenPullRequestStep`
+
+约束：
+
+- 单次 run 只允许推进有限 checklist slice，不允许“直到做完为止”的无限 agent 回环
+- `execute-step` 与 `open-pr` 都是有副作用 step，必须有独立 checkpoint
+- `validate-step` 失败时可返回 `blocked` / `retryable` / `manual_intervention` 三类结果，交由 runner 统一处理
+
+### 7.1 Worker 的迭代模型
+
+建议采用**每个 checklist slice 一个 run**，而不是在单个 run 内部做循环跳转：
+
+1. scheduler 为 task 入队
+2. runner 执行一轮 `prepare -> plan -> execute -> validate -> sync`
+3. 若 checklist 仍未完成，则重新入队下一轮 worker item
+4. 全部完成后才进入 `open-pr`
+
+这样 `LoopRunner` 可以保持线性 step sequencer，不需要引入 goto / cycle 语义。

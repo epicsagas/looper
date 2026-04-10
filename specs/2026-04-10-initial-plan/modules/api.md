@@ -52,21 +52,16 @@ type ApiResponse<T> = {
 - `GET /api/v1/worktrees`
 - `POST /api/v1/worktrees/:taskId/recover`
 
-### 4.4 Agent Profiles
+### 4.4 Pull Requests
 
-- `GET /api/v1/agent-profiles`
-- `POST /api/v1/agent-profiles`
-- `GET /api/v1/agent-profiles/:id`
-- `PATCH /api/v1/agent-profiles/:id`
-- `DELETE /api/v1/agent-profiles/:id`
-- `POST /api/v1/agent-profiles/:id/validate`
+- `GET /api/v1/pull-requests`
+- `GET /api/v1/pull-requests/:repo/:prNumber`
+- `GET /api/v1/pull-requests/:repo/:prNumber/status`
 
-### 4.5 Agent Bindings
+### 4.5 配置查看
 
-- `GET /api/v1/projects/:projectId/agent-bindings`
-- `PUT /api/v1/projects/:projectId/agent-bindings/:targetType`
-- `DELETE /api/v1/projects/:projectId/agent-bindings/:targetType`
-- `GET /api/v1/projects/:projectId/agent-resolution/:targetType`
+- `GET /api/v1/config`
+- MVP 阶段不提供 agent profile / binding 管理接口
 
 ---
 
@@ -130,7 +125,8 @@ type LooperStatusResponse = {
 
 1. healthz
 2. tasks
-3. loops
-4. runs/logs
-5. pr actions
-6. agent profiles / bindings
+3. pull requests
+4. loops
+5. runs/logs
+6. pr actions
+7. config inspection / diagnostics

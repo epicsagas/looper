@@ -14,7 +14,6 @@
 4. `snapshot`
 5. `review`
 6. `publish`
-7. `watch`
 
 ---
 
@@ -106,3 +105,22 @@
 - agent 失败：保留 👀 但打失败标记，并计划重试
 - publish 失败：重试写回，不重跑 review
 - snapshot 失败：终止本次 run
+
+---
+
+## 6. 接入共享 LoopRunner
+
+Reviewer 不单独实现自己的执行框架，而是把下列 step 映射给共享 `LoopRunner<ReviewerStep>`：
+
+- `discover` → `DiscoverReviewerTargetsStep`
+- `filter` → `FilterReviewerTargetsStep`
+- `claim` → `ClaimReviewerTargetStep`
+- `snapshot` → `SnapshotPullRequestStep`
+- `review` → `InvokeReviewerAgentStep`
+- `publish` → `PublishReviewResultStep`
+
+约束：
+
+- `review` 是唯一允许调用 agent 的 Reviewer step
+- `publish` 必须可幂等重试，不得因 publish 失败而重新 review 同一 head sha
+- `watch` 不作为常驻 step；由 scheduler 基于 head sha / review state 重新入队

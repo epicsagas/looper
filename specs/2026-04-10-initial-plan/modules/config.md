@@ -33,6 +33,7 @@ type LooperConfig = {
   server: ServerConfig
   storage: StorageConfig
   scheduler: SchedulerConfig
+  agent: AgentConfig
   logging: LoggingConfig
   notifications: NotificationConfig
   tools: ToolPathsConfig
@@ -80,7 +81,18 @@ type SchedulerConfig = {
 }
 ```
 
-### 4.4 NotificationConfig
+### 4.4 AgentConfig
+
+```ts
+type AgentConfig = {
+  vendor: 'claude-code' | 'codex' | 'opencode' | 'cursor-cli'
+  model?: string
+  params?: Record<string, unknown>
+  env?: Record<string, string>
+}
+```
+
+### 4.5 NotificationConfig
 
 ```ts
 type NotificationConfig = {
@@ -93,7 +105,7 @@ type NotificationConfig = {
 }
 ```
 
-### 4.5 LoggingConfig
+### 4.6 LoggingConfig
 
 ```ts
 type LoggingConfig = {
@@ -103,7 +115,7 @@ type LoggingConfig = {
 }
 ```
 
-### 4.6 ToolPathsConfig
+### 4.7 ToolPathsConfig
 
 ```ts
 type ToolPathsConfig = {
@@ -114,7 +126,7 @@ type ToolPathsConfig = {
 }
 ```
 
-### 4.7 DaemonConfig
+### 4.8 DaemonConfig
 
 ```ts
 type DaemonConfig = {
@@ -126,7 +138,7 @@ type DaemonConfig = {
 }
 ```
 
-### 4.8 PackageConfig
+### 4.9 PackageConfig
 
 ```ts
 type PackageConfig = {
@@ -136,7 +148,7 @@ type PackageConfig = {
 }
 ```
 
-### 4.9 DefaultsConfig
+### 4.10 DefaultsConfig
 
 ```ts
 type DefaultsConfig = {
@@ -144,10 +156,11 @@ type DefaultsConfig = {
   allowAutoCommit: boolean
   allowAutoPush: boolean
   allowAutoApprove: boolean
+  openPrStrategy?: 'all_done' | 'first_commit' | 'manual'
 }
 ```
 
-### 4.10 ProjectRefConfig
+### 4.11 ProjectRefConfig
 
 ```ts
 type ProjectRefConfig = {
@@ -183,6 +196,7 @@ Project 在 config 中是**静态真相源**，仅定义注册信息；运行态
 
 - `port` 必须在合法范围内
 - `dbPath`、`logDir`、`workingDirectory` 必须可写
+- `agent.vendor` 必须是当前已接入的单一 agent 之一
 - 当 `daemon.mode=launchd` 时，必须能解析出 `bunPath`
 - 当 `notifications.osascript.enabled=true` 时，必须能解析出 `osascriptPath`
 - `pollIntervalSeconds` 不能过小，建议最小 10 秒
@@ -211,7 +225,7 @@ Project 在 config 中是**静态真相源**，仅定义注册信息；运行态
 - `storage.dbPath` 对应 `storage.md`
 - `notifications` 对应 `integrations.md`
 - `daemon` 对应 `looperd.md`
-- `projects` / 默认 agent 行为会和 `agent-config.md`、`domain.md` 联动
+- `agent` / `projects` 会和 `integrations.md`、`domain.md` 联动
 
 ---
 

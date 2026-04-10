@@ -112,9 +112,67 @@ CREATE TABLE loops (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
   type TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id TEXT,
+  repo TEXT,
+  pr_number INTEGER,
   status TEXT NOT NULL,
   last_run_at TEXT,
   next_run_at TEXT
+);
+
+CREATE TABLE runs (
+  id TEXT PRIMARY KEY,
+  loop_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  current_step TEXT,
+  last_completed_step TEXT,
+  checkpoint_json TEXT,
+  last_heartbeat_at TEXT,
+  started_at TEXT NOT NULL,
+  ended_at TEXT
+);
+
+CREATE TABLE tasks (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  spec_path TEXT,
+  pr_number INTEGER,
+  status TEXT NOT NULL
+);
+
+CREATE TABLE task_items (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  content TEXT NOT NULL,
+  status TEXT NOT NULL,
+  source TEXT NOT NULL
+);
+
+CREATE TABLE pull_request_snapshots (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  pr_number INTEGER NOT NULL,
+  head_sha TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  captured_at TEXT NOT NULL
+);
+
+CREATE TABLE locks (
+  key TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+
+CREATE TABLE event_logs (
+  id TEXT PRIMARY KEY,
+  event_type TEXT NOT NULL,
+  entity_type TEXT,
+  entity_id TEXT,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 
 COMMIT;

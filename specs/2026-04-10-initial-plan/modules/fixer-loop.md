@@ -122,3 +122,23 @@ Agent 只消费 `FixItem[]`，不要直接消费混乱的原始 gh 输出。
 - 自动完成通知与远程通知渠道广播
 - 更稳定的 publish / retry / recovery 策略
 - 更细的 FixItem 分类与策略化修复
+
+---
+
+## 9. 接入共享 LoopRunner
+
+Fixer 通过 `LoopRunner<FixerStep>` 执行，step handler 映射建议：
+
+- `discover-pr` → `DiscoverFixerTargetsStep`
+- `claim-pr` → `ClaimFixerTargetStep`
+- `collect-fixes` → `CollectFixItemsStep`
+- `repair` → `InvokeFixerAgentStep`
+- `validate` → `ValidateFixResultStep`
+- `push` → `PushFixCommitStep`
+- `recheck` → `RecheckPullRequestHealthStep`
+
+约束：
+
+- `repair` 是唯一允许调用 agent 的 Fixer step
+- `collect-fixes` 必须输出稳定的 `FixItem[]` 快照，后续步骤不直接依赖原始 GitHub 输出
+- `push` 与 `recheck` 必须分离，保证 push 成功但 recheck 失败时可以从后者恢复

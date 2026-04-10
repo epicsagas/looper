@@ -75,26 +75,30 @@ apps/
 
 ### 5.1 Store Interface Layer
 
-定义领域侧访问接口，例如：
+`Store` 根接口是**MVP 可接受的上限**，不是必须第一天实现到这个精度。
 
-- `ProjectStore`
-- `AgentProfileStore`
-- `AgentBindingStore`
-- `LoopStore`
-- `RunStore`
-- `TaskStore`
-- `ChecklistStore`
-- `LockStore`
-- `EventLogStore`
-- `QueueStore`
+MVP 完全可以先从一个 `db.ts` + 一组具名函数起步；如果开始出现事务边界混乱，再收敛为一个 `Store` 根接口，内部按 namespace 分组。
+
+- `domain`：`Project / Loop / Run / Task / TaskItem / PullRequestSnapshot`
+- `queue`：入队、出队、重试、调度查询
+- `locks`：业务锁（PR / task）
+- `events`：`EventLog / Notification / AgentExecutionLog`
+
+注意：
+
+- `lock` 和 `queue` 是不同语义，不共享接口
+- `run heartbeat` 归 `domain.runs`
+- MVP 单进程下先不引入 lease
 
 ### 5.2 Persistence Adapter Layer
 
 实现具体持久化：
 
-- `SqliteProjectStore`
-- `SqliteLoopStore`
-- `SqliteTaskStore`
+- `SqliteStore`
+
+可在内部按 namespace 分文件实现，但对业务层只暴露一个根 store。
+
+如果第一版实现更简单，也允许先不显式定义完整接口层。
 
 ### 5.3 Storage Coordinator
 
@@ -147,97 +151,78 @@ export interface StorageHealth {
 }
 ```
 
-### 7.2 ProjectStore
+### 7.2 Store（收敛后的接口形态）
 
 ```ts
-export interface ProjectStore {
-  list(): Promise<Project[]>
-  getById(id: string): Promise<Project | null>
-  save(project: Project): Promise<void>
-  delete(id: string): Promise<void>
-}
-```
+export interface Store {
+  withTransaction<T>(fn: (store: Store) => Promise<T>): Promise<T>
 
-### 7.3 LoopStore
+  domain: {
+    projects: {
+      list(): Promise<Project[]>
+      getById(id: string): Promise<Project | null>
+      save(project: Project): Promise<void>
+      delete(id: string): Promise<void>
+    }
+    loops: {
+      list(): Promise<Loop[]>
+      listByStatus(status: LoopStatus): Promise<Loop[]>
+      getById(id: string): Promise<Loop | null>
+      save(loop: Loop): Promise<void>
+      updateStatus(id: string, status: LoopStatus): Promise<void>
+    }
+    runs: {
+      listByLoop(loopId: string): Promise<Run[]>
+      getById(id: string): Promise<Run | null>
+      save(run: Run): Promise<void>
+      heartbeat(id: string, at: string): Promise<void>
+      finish(input: {
+        id: string
+        status: 'success' | 'failed' | 'cancelled' | 'interrupted' | 'parse_failed'
+        summary?: string
+        errorMessage?: string
+        endedAt: string
+      }): Promise<void>
+    }
+    tasks: {
+      list(): Promise<Task[]>
+      getById(id: string): Promise<Task | null>
+      save(task: Task): Promise<void>
+      updatePRLink(taskId: string, prNumber: number): Promise<void>
+    }
+    taskItems: {
+      listByTask(taskId: string): Promise<TaskItem[]>
+      create(item: TaskItem): Promise<void>
+      update(item: TaskItem): Promise<void>
+      markDone(id: string): Promise<void>
+      listOpenByTask(taskId: string): Promise<TaskItem[]>
+    }
+    pullRequestSnapshots: {
+      save(snapshot: PullRequestSnapshot): Promise<void>
+      getLatest(projectId: string, repo: string, prNumber: number): Promise<PullRequestSnapshot | null>
+    }
+  }
 
-```ts
-export interface LoopStore {
-  list(): Promise<Loop[]>
-  listByStatus(status: LoopStatus): Promise<Loop[]>
-  getById(id: string): Promise<Loop | null>
-  save(loop: Loop): Promise<void>
-  updateStatus(id: string, status: LoopStatus): Promise<void>
-}
-```
+  queue: {
+    enqueue(item: QueueItemRecord): Promise<void>
+    dequeue(id: string): Promise<void>
+    listScheduled(): Promise<QueueItemRecord[]>
+    markAttempt(id: string, attempts: number): Promise<void>
+  }
 
-### 7.4 RunStore
+  locks: {
+    acquire(lock: LockRecord): Promise<boolean>
+    release(key: string): Promise<void>
+    get(key: string): Promise<LockRecord | null>
+    listExpired(now: string): Promise<LockRecord[]>
+  }
 
-```ts
-export interface RunStore {
-  listByLoop(loopId: string): Promise<Run[]>
-  getById(id: string): Promise<Run | null>
-  save(run: Run): Promise<void>
-  finish(input: {
-    id: string
-    status: 'success' | 'failed' | 'cancelled' | 'interrupted' | 'parse_failed'
-    summary?: string
-    errorMessage?: string
-    endedAt: string
-  }): Promise<void>
-}
-```
-
-### 7.5 TaskStore
-
-```ts
-export interface TaskStore {
-  list(): Promise<Task[]>
-  getById(id: string): Promise<Task | null>
-  save(task: Task): Promise<void>
-  updatePRLink(taskId: string, prNumber: number): Promise<void>
-}
-```
-
-### 7.6 ChecklistStore
-
-```ts
-export interface ChecklistStore {
-  listByTask(taskId: string): Promise<ChecklistItem[]>
-  create(item: ChecklistItem): Promise<void>
-  update(item: ChecklistItem): Promise<void>
-  markDone(id: string): Promise<void>
-  listOpenByTask(taskId: string): Promise<ChecklistItem[]>
-}
-```
-
-### 7.7 LockStore
-
-```ts
-export interface LockStore {
-  acquire(lock: LockRecord): Promise<boolean>
-  release(key: string): Promise<void>
-  get(key: string): Promise<LockRecord | null>
-  listExpired(now: string): Promise<LockRecord[]>
-}
-```
-
-### 7.8 EventLogStore
-
-```ts
-export interface EventLogStore {
-  append(event: EventLogRecord): Promise<void>
-  listByEntity(entityType: string, entityId: string): Promise<EventLogRecord[]>
-}
-```
-
-### 7.9 QueueStore
-
-```ts
-export interface QueueStore {
-  enqueue(item: QueueItemRecord): Promise<void>
-  dequeue(id: string): Promise<void>
-  listScheduled(): Promise<QueueItemRecord[]>
-  markAttempt(id: string, attempts: number): Promise<void>
+  events: {
+    append(event: EventLogRecord): Promise<void>
+    listByEntity(entityType: string, entityId: string): Promise<EventLogRecord[]>
+    appendNotification(notification: NotificationRecord): Promise<void>
+    appendAgentExecution(execution: AgentExecutionRecord): Promise<void>
+  }
 }
 ```
 
@@ -248,18 +233,7 @@ export interface QueueStore {
 业务服务只能依赖接口，例如：
 
 ```ts
-export interface LooperStores {
-  projects: ProjectStore
-  agentProfiles: AgentProfileStore
-  agentBindings: AgentBindingStore
-  loops: LoopStore
-  runs: RunStore
-  tasks: TaskStore
-  checklist: ChecklistStore
-  locks: LockStore
-  events: EventLogStore
-  queue: QueueStore
-}
+export type LooperStore = Store
 ```
 
 重点：这里完全不出现 SQLite SQL 细节。
@@ -274,19 +248,21 @@ export interface LooperStores {
 
 - 创建 run + 写 event
 - acquire lock + 变更 loop 状态
-- 完成 checklist item + 更新 task
+- 完成 task item + 更新 task
 - enqueue/dequeue + attempts 更新
+
+无论是否显式实现 `Store` 接口，MVP 都要求：跨边界的关键写操作必须在同一事务中完成。
 
 ### 9.2 恢复
 
-looperd 启动时应执行：
+looperd 启动时应执行统一恢复 pipeline：
 
 1. 打开 SQLite
 2. 执行 migrations
-3. 扫描过期锁并清理
-4. 将异常中断的 `running` run 标为 `failed` 或 `interrupted`
-5. 恢复未完成的 queue items
-6. 记录恢复事件
+3. 清理过期锁（失败则阻塞启动）
+4. 标记中断 run（失败则阻塞启动）
+5. 校正 queue 状态（失败则阻塞启动）
+6. 记录恢复事件（失败只 warning）
 
 ### 9.3 备份
 
@@ -297,17 +273,13 @@ looperd 启动时应执行：
 
 ## 10. 记录模型建议
 
-建议区分 **领域对象** 与 **存储记录**：
+MVP 先保持一层模型即可，避免过早引入 `Domain -> Record -> SQL row` 多层映射。
 
-- `Loop` / `LoopRecord`
-- `Task` / `TaskRecord`
-- `Run` / `RunRecord`
-- `QueueItem` / `QueueItemRecord`
+只有当出现以下真实需求时，再拆 record 层：
 
-这样做的好处：
-
-- SQL schema 调整时不影响业务层
-- 未来迁 Postgres 更容易
+- 多数据库实现
+- 明显的领域对象/存储对象分歧
+- 复杂查询优化需要独立 DTO
 - 能显式处理序列化字段（如 `Date -> string`）
 
 ---

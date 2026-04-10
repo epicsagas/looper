@@ -12,10 +12,7 @@ CLI 和 UI 都只作为 `looperd` 的客户端，不直接操作 GitHub、Git、
 
 - `looper status`
 - `looper project add`
-- `looper agent profile list`
-- `looper agent profile create`
-- `looper agent binding list`
-- `looper agent binding set`
+- `looper config show`
 - `looper daemon install`
 - `looper daemon status`
 - `looper daemon logs`
@@ -23,9 +20,28 @@ CLI 和 UI 都只作为 `looperd` 的客户端，不直接操作 GitHub、Git、
 - `looper loop start`
 - `looper loop pause`
 - `looper task create`
+- `looper task start`
+- `looper task pause`
+- `looper task status`
 - `looper task show`
+- `looper pr list`
+- `looper pr show`
+- `looper pr status`
 - `looper run list`
 - `looper logs tail`
+
+说明：
+
+- `task` 是常规用户主入口
+- `pr` 是协作与交付的高频查看入口
+- `loop start --type reviewer|fixer` 主要用于“已有 PR 托管”场景
+- 常规 task 流程中，不应要求用户手动编排 worker / reviewer / fixer 三个 loop
+
+推荐心智：
+
+- `task`：开发入口
+- `pr`：协作 / 交付入口
+- `loop`：高级 / 调试入口
 
 ### 2.2 CLI 分层
 
@@ -70,6 +86,34 @@ CLI 和 UI 都只作为 `looperd` 的客户端，不直接操作 GitHub、Git、
 
 推荐让 daemon 命令既输出 launchd 信息，也输出 `looperd` 自身健康状态，避免只看到“已加载”但服务实际上不可用。
 
+### 2.6 config 命令建议
+
+- `looper config show`：查看当前生效配置
+- MVP 阶段不提供 agent profile / binding CRUD
+
+### 2.7 PR 命令建议
+
+- `looper pr list`：列出当前项目中用户最关心的 PR 状态
+- `looper pr show <repo>#<number>`：查看某个 PR 的完整摘要
+- `looper pr status <repo>#<number>`：查看某个 PR 当前是否在 review / fix / blocked
+
+`looper pr list` 建议支持：
+
+- `--active`
+- `--blocked`
+- `--needs-review`
+- `--needs-fix`
+- `--json`
+
+建议展示：
+
+- PR 标识（repo / number / title）
+- 关联 task（如果存在）
+- reviewer loop 状态
+- fixer loop 状态
+- 最近一次 run
+- 当前阻塞摘要
+
 ---
 
 ## 3. UI 实现计划
@@ -81,8 +125,7 @@ CLI 和 UI 都只作为 `looperd` 的客户端，不直接操作 GitHub、Git、
 - Task 详情
 - PR / Run 详情
 - Settings
-- Agent Profiles
-- Agent Bindings
+- Config 查看
 
 ### 3.2 页面优先级
 
@@ -95,15 +138,12 @@ CLI 和 UI 都只作为 `looperd` 的客户端，不直接操作 GitHub、Git、
 - Checklist panel
 - PR health summary
 - Agent log viewer
-- Agent profile form
-- Agent binding matrix
+- Config viewer
 
 ### 3.4 Agent 配置页建议
 
-- Profile 列表页：按 vendor / scope / enabled 筛选
-- Profile 编辑页：按 vendor 渲染不同参数表单
-- Binding 页：按 `reviewer / worker / fixer` 配置项目绑定
-- Resolve 预览：展示最终解析后的 vendor/model/关键参数
+- MVP 阶段只做只读配置查看
+- 多 profile / binding 页面后置到 Phase 2
 
 ---
 

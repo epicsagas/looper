@@ -31,6 +31,31 @@ Looper 是一个面向研发流程自动化的工具，目标是将 PR review、
 
 ## 4. 推荐 Monorepo 结构
 
+MVP 不建议一开始拆太多 package。
+
+第一阶段推荐先把核心实现都放在 `apps/looperd/src/` 下，按目录分层：
+
+```txt
+apps/
+  looperd/
+    src/
+      bootstrap/
+      server/
+      app/
+      domain/
+      infra/
+      storage/
+      runtime/
+  cli/
+  web/
+
+specs/
+```
+
+只有当某个模块被第二个消费者复用时，再提取到 `packages/`。
+
+后续可演进结构：
+
 ```txt
 apps/
   looperd/
@@ -39,10 +64,12 @@ apps/
 
 packages/
   core/
+  loop-runner/
   agent-adapters/
   github/
   git/
   scheduler/
+  hooks/
   notifications/
   config/
   logger/
@@ -76,7 +103,7 @@ CLI / UI 均为 `looperd` 客户端，不直接操作 GitHub、Git、Agent。
 统一抽象 Coding Agent、GitHub、Git/worktree、通知通道，避免业务逻辑散落在 shell 命令中。
 
 - 详细实现计划：[`./modules/integrations.md`](./modules/integrations.md)
-- Agents 持久化配置：[`./modules/agent-config.md`](./modules/agent-config.md)
+- Phase 2 Agent 配置预研：[`./modules/agent-config.md`](./modules/agent-config.md)
 
 ### 5.4 核心领域模型
 
@@ -85,9 +112,35 @@ CLI / UI 均为 `looperd` 客户端，不直接操作 GitHub、Git、Agent。
 - 详细实现计划：[`./modules/domain.md`](./modules/domain.md)
 - 存储接口设计：[`./storage.md`](./storage.md)
 
-### 5.5 Agents 配置
+### 5.5 Loop Runner
 
-Looper 需要持久化各类 coding agent 的 profile、模型、权限、输出模式、subagent/background 参数，以及 Reviewer / Worker / Fixer 到 profile 的绑定关系。
+`LoopRunner<TStep>` 是**目标架构**，不是 MVP 前置条件。
+
+理想上它会作为三类 loop 的共享执行底座，负责：
+
+- step 编排与推进
+- checkpoint 持久化
+- interruption / resume
+- timeout / retry / cancellation
+- 统一事件发射
+
+但第一条链路实现时，允许先在具体 loop 内直接写线性执行逻辑；待 Reviewer / Worker / Fixer 都跑通后，再决定是否提炼成统一 runner。
+
+- 详细实现计划：[`./modules/domain.md`](./modules/domain.md)、[`./modules/scheduler.md`](./modules/scheduler.md)
+
+### 5.6 Hooks / Extension Bus
+
+HookBus 也是**目标架构**，不是 MVP 前置条件。
+
+它用于把通知、审计、metrics、trace、调试输出等横切能力从核心 loop 中抽离。
+
+补充：MVP 阶段可以不实现 HookBus，直接在关键路径写 event log / notification；若实现，也只做静态注册少量内建 hook，不做运行时动态启停。
+
+- 详细实现计划：[`./modules/hooks.md`](./modules/hooks.md)
+
+### 5.7 Agents 配置
+
+MVP 阶段只保留单一 `AgentConfig`；多 profile / binding / fallback 设计后置到 Phase 2。
 
 - 详细实现计划：[`./modules/agent-config.md`](./modules/agent-config.md)
 
@@ -128,6 +181,8 @@ Looper 需要持久化各类 coding agent 的 profile、模型、权限、输出
 ### 7.2 Scheduler / Queue
 
 将“发现工作”和“执行工作”解耦，通过队列、锁、重试、限流驱动三类 loop。
+
+补充：scheduler 只负责“何时执行什么”，真正的 step 生命周期、恢复与取消统一交给 `LoopRunner`。
 
 - 详细实现计划：[`./modules/scheduler.md`](./modules/scheduler.md)
 
@@ -211,6 +266,11 @@ MVP 使用 **SQLite**，并明确采用：
 4. **Checklist 以存储实体为主**；后续再考虑与 markdown 双向同步。
 5. **GitHub 数据源优先用 gh cli**；后续如稳定性或性能不足再切官方 API。
 6. **looperd 先面向本机运行**；macOS 上推荐由 launchd 托管。
+7. **三类 loop 共用同一执行底座**；避免 Reviewer / Worker / Fixer 各自复制状态机、重试与恢复逻辑。
+8. **Agent 执行必须进程可控、可观测、可取消**；不接受“只拿 stdout/stderr 最终结果”的黑盒模型。
+9. **MVP 采用 `1 Task : 1 PR : 1 Worker`**；先不支持多 task 汇入同一个 PR。
+10. **用户主入口是 task / PR，不是 loop**；常规 task 流程中 reviewer / fixer 应由系统自动串联。
+11. **Worker 主要负责 PR 创建前的推进**；PR 创建后的 review / fix 问题优先由 reviewer / fixer 接管。
 
 ---
 
@@ -221,6 +281,7 @@ MVP 使用 **SQLite**，并明确采用：
 - looperd：[`./modules/looperd.md`](./modules/looperd.md)
 - CLI / UI：[`./modules/clients.md`](./modules/clients.md)
 - looperd 配置：[`./modules/config.md`](./modules/config.md)
+- Hooks / Extension Bus：[`./modules/hooks.md`](./modules/hooks.md)
 - 外部集成：[`./modules/integrations.md`](./modules/integrations.md)
 - Agents 配置：[`./modules/agent-config.md`](./modules/agent-config.md)
 - 领域模型：[`./modules/domain.md`](./modules/domain.md)
@@ -229,6 +290,7 @@ MVP 使用 **SQLite**，并明确采用：
 - Fixer Loop：[`./modules/fixer-loop.md`](./modules/fixer-loop.md)
 - HTTP API：[`./modules/api.md`](./modules/api.md)
 - Scheduler / Queue：[`./modules/scheduler.md`](./modules/scheduler.md)
+- PR 自动发现机制：[`./pr-discovery.md`](./pr-discovery.md)
 
 ---
 

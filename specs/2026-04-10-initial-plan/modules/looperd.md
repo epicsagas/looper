@@ -21,6 +21,7 @@ apps/looperd/
     server/
     app/
     domain/
+    hooks/
     infra/
     storage/
     bootstrap/
@@ -40,6 +41,8 @@ apps/looperd/
 - 初始化 adapters
 - 启动 scheduler
 - 启动 HTTP server
+
+补充：`HookBus` 不是 MVP 启动前置；只有在实现对应抽象时才初始化。
 
 ### 3.2 server
 
@@ -77,6 +80,16 @@ apps/looperd/
 - Git/worktree adapter
 - Notification adapter
 
+### 3.6 hooks（后续可选）
+
+负责：
+
+- 生命周期事件订阅
+- 审计日志落盘
+- 通知分发
+- metrics / trace / debug stream
+- hook 错误隔离与开关控制
+
 ---
 
 ## 4. 启动顺序
@@ -85,9 +98,10 @@ apps/looperd/
 2. 初始化存储
 3. 做恢复逻辑
 4. 初始化 adapters
-5. 启动 scheduler
-6. 启动 HTTP server
-7. 写入 `looperd.started` 事件
+5. 如已实现，则初始化 HookBus 与 process registry
+6. 启动 scheduler
+7. 启动 HTTP server
+8. 写入 `looperd.started` 事件
 
 关闭顺序相反。
 
@@ -151,13 +165,22 @@ npm 分发阶段特点：
 
 ## 5. 恢复逻辑
 
-启动时必须执行：
+启动时必须执行统一恢复 pipeline：
 
-1. 清理过期锁
-2. 标记中断的 run
-3. 恢复未完成 loop 的下一次调度时间
-4. 检查 worktree 映射是否还存在
-5. 写恢复审计日志
+1. 清理 orphan agent process
+2. 清理过期锁
+3. 标记中断的 run
+4. 恢复未完成 loop 的下一次调度时间
+5. 检查 worktree 映射是否还存在
+6. 写恢复审计日志
+
+失败策略：
+
+- `orphan process` 清理失败：记 warning，允许继续启动
+- `过期锁` / `中断 run` / `loop 状态恢复` 失败：阻塞启动
+- `审计日志` 写失败：记 warning，允许继续启动
+
+说明：如果 `looperd` 崩溃时仍有 agent 子进程存活，恢复阶段必须优先处理 orphan process，避免后台继续修改 worktree。
 
 ---
 
@@ -173,8 +196,9 @@ interface LooperdRuntime {
 ```ts
 interface RuntimeDeps {
   config: AppConfig
-  stores: LooperStores
+  stores: LooperStore
   scheduler: Scheduler
+  hookBus?: HookBus
   github: GitHubGateway
   agents: AgentRegistry
   git: GitGateway
