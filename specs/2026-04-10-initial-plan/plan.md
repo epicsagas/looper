@@ -177,16 +177,16 @@
 
 ## 12. Fixer Loop（第一阶段基础版）
 
-- [ ] 实现 fixer `discover-pr`
-- [ ] 实现 fixer `claim-pr`
-- [ ] 实现 fixer `collect-fixes`
-- [ ] 实现 fixer `repair`
-- [ ] 实现 fixer `validate`
-- [ ] 实现 fixer `push`
-- [ ] 实现 fixer `recheck`
-- [ ] 实现 FixItem 快照模型
-- [ ] 实现 fixer 与 reviewer 的 PR 互斥规则
-- [ ] 实现 fixer 基础失败恢复
+- [x] 实现 fixer `discover-pr`
+- [x] 实现 fixer `claim-pr`
+- [x] 实现 fixer `collect-fixes`
+- [x] 实现 fixer `repair`
+- [x] 实现 fixer `validate`
+- [x] 实现 fixer `push`
+- [x] 实现 fixer `recheck`
+- [x] 实现 FixItem 快照模型
+- [x] 实现 fixer 与 reviewer 的 PR 互斥规则
+- [x] 实现 fixer 基础失败恢复
 
 ## 13. 审计、日志与状态可见性
 
@@ -216,7 +216,7 @@
 - [ ] 为 scheduler 重试与退避写测试
 - [x] 为 reviewer loop 第一条链路写集成测试
 - [x] 为 worker 基础链路写集成测试
-- [ ] 为 fixer 基础链路写集成测试
+- [x] 为 fixer 基础链路写集成测试
 - [ ] 为恢复流程写测试
 - [ ] 为 agent timeout / kill 写测试
 
