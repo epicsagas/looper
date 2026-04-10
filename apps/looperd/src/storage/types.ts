@@ -64,6 +64,7 @@ export interface ProjectRecord {
 
 export interface LoopRecord {
   id: string;
+  projectId: string;
   type: string;
   targetType: string;
   targetId?: string | null;
@@ -96,6 +97,7 @@ export interface RunRecord {
 
 export interface TaskRecord {
   id: string;
+  projectId: string;
   title: string;
   description?: string | null;
   status: string;
@@ -121,10 +123,19 @@ export interface TaskItemRecord {
 
 export interface PullRequestSnapshotRecord {
   id: string;
+  projectId: string;
   repo: string;
   prNumber: number;
   headSha: string;
-  payloadJson: string;
+  baseSha?: string | null;
+  title?: string | null;
+  body?: string | null;
+  author?: string | null;
+  diffRef?: string | null;
+  checksSummary?: string | null;
+  unresolvedThreadCount?: number | null;
+  reviewState?: string | null;
+  payloadJson?: string | null;
   capturedAt: string;
   createdAt: string;
 }
@@ -132,8 +143,16 @@ export interface PullRequestSnapshotRecord {
 export interface EventLogRecord {
   id: string;
   eventType: string;
+  projectId?: string | null;
+  loopId?: string | null;
+  runId?: string | null;
   entityType?: string | null;
   entityId?: string | null;
+  correlationId?: string | null;
+  causationId?: string | null;
+  actorType?: string | null;
+  actorId?: string | null;
+  actorDisplayName?: string | null;
   payloadJson: string;
   createdAt: string;
 }

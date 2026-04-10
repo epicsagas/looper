@@ -51,6 +51,7 @@ describe("SqliteStore", () => {
     });
     store.loops.upsert({
       id: "loop_1",
+      projectId: "project_1",
       type: "reviewer",
       targetType: "pull_request",
       targetId: "pr:42",
@@ -81,6 +82,7 @@ describe("SqliteStore", () => {
     });
     store.tasks.upsert({
       id: "task_1",
+      projectId: "project_1",
       title: "Implement persistence",
       description: "Finish SQLite foundation",
       status: "in_progress",
@@ -104,9 +106,18 @@ describe("SqliteStore", () => {
     });
     store.pullRequestSnapshots.upsert({
       id: "snapshot_1",
+      projectId: "project_1",
       repo: "acme/looper",
       prNumber: 42,
       headSha: "abc123",
+      baseSha: "base123",
+      title: "Persistence",
+      body: "This adds storage",
+      author: "octocat",
+      diffRef: "refs/pull/42/head",
+      checksSummary: "all-green",
+      unresolvedThreadCount: 2,
+      reviewState: "changes_requested",
       payloadJson: '{"title":"Persistence"}',
       capturedAt: now,
       createdAt: now,
@@ -114,8 +125,16 @@ describe("SqliteStore", () => {
     store.events.append({
       id: "event_1",
       eventType: "loop.created",
+      projectId: "project_1",
+      loopId: "loop_1",
+      runId: "run_1",
       entityType: "loop",
       entityId: "loop_1",
+      correlationId: "corr_1",
+      causationId: "cause_1",
+      actorType: "agent",
+      actorId: "reviewer_1",
+      actorDisplayName: "Reviewer",
       payloadJson: '{"status":"idle"}',
       createdAt: now,
     });
@@ -142,15 +161,26 @@ describe("SqliteStore", () => {
       updatedAt: now,
     });
     expect(store.loops.getById("loop_1")?.repo).toBe("acme/looper");
+    expect(store.loops.getById("loop_1")?.projectId).toBe("project_1");
     expect(store.runs.listByLoop("loop_1")).toHaveLength(1);
     expect(store.tasks.list()).toHaveLength(1);
+    expect(store.tasks.getById("task_1")?.projectId).toBe("project_1");
     expect(store.taskItems.listByTask("task_1")[0]?.content).toBe(
       "Write migrations",
     );
     expect(
       store.pullRequestSnapshots.getLatest("acme/looper", 42)?.headSha,
     ).toBe("abc123");
+    expect(
+      store.pullRequestSnapshots.getLatest("acme/looper", 42)?.projectId,
+    ).toBe("project_1");
+    expect(
+      store.pullRequestSnapshots.getLatest("acme/looper", 42)?.baseSha,
+    ).toBe("base123");
     expect(store.events.listByEntity("loop", "loop_1")).toHaveLength(1);
+    expect(store.events.listByEntity("loop", "loop_1")[0]?.actorId).toBe(
+      "reviewer_1",
+    );
     expect(store.locks.get("pr:acme/looper:42")?.owner).toBe("reviewer-loop");
 
     const health = store.schema.healthcheck();
@@ -171,10 +201,22 @@ describe("SqliteStore", () => {
 
     const now = "2026-04-11T12:00:00.000Z";
 
+    store.projects.upsert({
+      id: "project_1",
+      name: "Looper",
+      repoPath: "/tmp/looper",
+      baseBranch: "main",
+      archived: false,
+      metadataJson: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+
     expect(() =>
       store.withTransaction((tx) => {
         tx.tasks.upsert({
           id: "task_rollback",
+          projectId: "project_1",
           title: "Temporary",
           description: null,
           status: "pending",
@@ -188,6 +230,7 @@ describe("SqliteStore", () => {
         tx.events.append({
           id: "event_rollback",
           eventType: "task.created",
+          projectId: "project_1",
           entityType: "task",
           entityId: "task_rollback",
           payloadJson: "{}",

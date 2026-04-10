@@ -19,6 +19,7 @@ CREATE INDEX IF NOT EXISTS idx_projects_archived ON projects (archived);
 
 CREATE TABLE IF NOT EXISTS loops (
   id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
   type TEXT NOT NULL,
   target_type TEXT NOT NULL,
   target_id TEXT,
@@ -31,6 +32,7 @@ CREATE TABLE IF NOT EXISTS loops (
   next_run_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
   CHECK (target_type IN ('task', 'pull_request', 'repository', 'manual')),
   CHECK (pr_number IS NULL OR pr_number > 0)
 );
@@ -74,10 +76,21 @@ CREATE INDEX IF NOT EXISTS idx_locks_expires_at ON locks (expires_at);
 CREATE TABLE IF NOT EXISTS event_logs (
   id TEXT PRIMARY KEY,
   event_type TEXT NOT NULL,
+  project_id TEXT,
+  loop_id TEXT,
+  run_id TEXT,
   entity_type TEXT,
   entity_id TEXT,
+  correlation_id TEXT,
+  causation_id TEXT,
+  actor_type TEXT,
+  actor_id TEXT,
+  actor_display_name TEXT,
   payload_json TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE SET NULL,
+  FOREIGN KEY (loop_id) REFERENCES loops (id) ON DELETE SET NULL,
+  FOREIGN KEY (run_id) REFERENCES runs (id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_event_logs_entity_created_at ON event_logs (entity_type, entity_id, created_at);
@@ -85,12 +98,22 @@ CREATE INDEX IF NOT EXISTS idx_event_logs_type_created_at ON event_logs (event_t
 
 CREATE TABLE IF NOT EXISTS pull_request_snapshots (
   id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
   repo TEXT NOT NULL,
   pr_number INTEGER NOT NULL,
   head_sha TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
+  base_sha TEXT,
+  title TEXT,
+  body TEXT,
+  author TEXT,
+  diff_ref TEXT,
+  checks_summary TEXT,
+  unresolved_thread_count INTEGER,
+  review_state TEXT,
+  payload_json TEXT,
   captured_at TEXT NOT NULL,
   created_at TEXT NOT NULL,
+  FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
   CHECK (pr_number > 0)
 );
 
@@ -98,6 +121,7 @@ CREATE INDEX IF NOT EXISTS idx_pull_request_snapshots_repo_pr ON pull_request_sn
 
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
   title TEXT NOT NULL,
   description TEXT,
   status TEXT NOT NULL,
@@ -107,6 +131,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   metadata_json TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
   FOREIGN KEY (loop_id) REFERENCES loops (id) ON DELETE SET NULL,
   CHECK (pr_number IS NULL OR pr_number > 0)
 );

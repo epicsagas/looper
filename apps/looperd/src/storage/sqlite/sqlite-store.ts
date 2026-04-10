@@ -85,9 +85,10 @@ export class SqliteStore implements Store {
     upsert: (record: LoopRecord): void => {
       this.coordinator.db
         .query(`
-          INSERT INTO loops (id, type, target_type, target_id, repo, pr_number, status, config_json, metadata_json, last_run_at, next_run_at, created_at, updated_at)
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+          INSERT INTO loops (id, project_id, type, target_type, target_id, repo, pr_number, status, config_json, metadata_json, last_run_at, next_run_at, created_at, updated_at)
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
           ON CONFLICT(id) DO UPDATE SET
+            project_id=excluded.project_id,
             type=excluded.type,
             target_type=excluded.target_type,
             target_id=excluded.target_id,
@@ -102,6 +103,7 @@ export class SqliteStore implements Store {
         `)
         .run(
           record.id,
+          record.projectId,
           record.type,
           record.targetType,
           record.targetId ?? null,
@@ -182,9 +184,10 @@ export class SqliteStore implements Store {
     upsert: (record: TaskRecord): void => {
       this.coordinator.db
         .query(`
-          INSERT INTO tasks (id, title, description, status, loop_id, repo, pr_number, metadata_json, created_at, updated_at)
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+          INSERT INTO tasks (id, project_id, title, description, status, loop_id, repo, pr_number, metadata_json, created_at, updated_at)
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
           ON CONFLICT(id) DO UPDATE SET
+            project_id=excluded.project_id,
             title=excluded.title,
             description=excluded.description,
             status=excluded.status,
@@ -196,6 +199,7 @@ export class SqliteStore implements Store {
         `)
         .run(
           record.id,
+          record.projectId,
           record.title,
           record.description ?? null,
           record.status,
@@ -268,21 +272,39 @@ export class SqliteStore implements Store {
     upsert: (record: PullRequestSnapshotRecord): void => {
       this.coordinator.db
         .query(`
-          INSERT INTO pull_request_snapshots (id, repo, pr_number, head_sha, payload_json, captured_at, created_at)
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+          INSERT INTO pull_request_snapshots (id, project_id, repo, pr_number, head_sha, base_sha, title, body, author, diff_ref, checks_summary, unresolved_thread_count, review_state, payload_json, captured_at, created_at)
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
           ON CONFLICT(id) DO UPDATE SET
+            project_id=excluded.project_id,
             repo=excluded.repo,
             pr_number=excluded.pr_number,
             head_sha=excluded.head_sha,
+            base_sha=excluded.base_sha,
+            title=excluded.title,
+            body=excluded.body,
+            author=excluded.author,
+            diff_ref=excluded.diff_ref,
+            checks_summary=excluded.checks_summary,
+            unresolved_thread_count=excluded.unresolved_thread_count,
+            review_state=excluded.review_state,
             payload_json=excluded.payload_json,
             captured_at=excluded.captured_at
         `)
         .run(
           record.id,
+          record.projectId,
           record.repo,
           record.prNumber,
           record.headSha,
-          record.payloadJson,
+          record.baseSha ?? null,
+          record.title ?? null,
+          record.body ?? null,
+          record.author ?? null,
+          record.diffRef ?? null,
+          record.checksSummary ?? null,
+          record.unresolvedThreadCount ?? null,
+          record.reviewState ?? null,
+          record.payloadJson ?? null,
           record.capturedAt,
           record.createdAt,
         );
@@ -304,13 +326,21 @@ export class SqliteStore implements Store {
     append: (record: EventLogRecord): void => {
       this.coordinator.db
         .query(
-          "INSERT INTO event_logs (id, event_type, entity_type, entity_id, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+          "INSERT INTO event_logs (id, event_type, project_id, loop_id, run_id, entity_type, entity_id, correlation_id, causation_id, actor_type, actor_id, actor_display_name, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )
         .run(
           record.id,
           record.eventType,
+          record.projectId ?? null,
+          record.loopId ?? null,
+          record.runId ?? null,
           record.entityType ?? null,
           record.entityId ?? null,
+          record.correlationId ?? null,
+          record.causationId ?? null,
+          record.actorType ?? null,
+          record.actorId ?? null,
+          record.actorDisplayName ?? null,
           record.payloadJson,
           record.createdAt,
         );
@@ -392,6 +422,7 @@ function mapProject(row: Record<string, unknown>): ProjectRecord {
 function mapLoop(row: Record<string, unknown>): LoopRecord {
   return {
     id: String(row.id),
+    projectId: String(row.project_id),
     type: String(row.type),
     targetType: String(row.target_type),
     targetId: asNullableString(row.target_id),
@@ -428,6 +459,7 @@ function mapRun(row: Record<string, unknown>): RunRecord {
 function mapTask(row: Record<string, unknown>): TaskRecord {
   return {
     id: String(row.id),
+    projectId: String(row.project_id),
     title: String(row.title),
     description: asNullableString(row.description),
     status: String(row.status),
@@ -459,10 +491,19 @@ function mapPullRequestSnapshot(
 ): PullRequestSnapshotRecord {
   return {
     id: String(row.id),
+    projectId: String(row.project_id),
     repo: String(row.repo),
     prNumber: Number(row.pr_number),
     headSha: String(row.head_sha),
-    payloadJson: String(row.payload_json),
+    baseSha: asNullableString(row.base_sha),
+    title: asNullableString(row.title),
+    body: asNullableString(row.body),
+    author: asNullableString(row.author),
+    diffRef: asNullableString(row.diff_ref),
+    checksSummary: asNullableString(row.checks_summary),
+    unresolvedThreadCount: asNullableNumber(row.unresolved_thread_count),
+    reviewState: asNullableString(row.review_state),
+    payloadJson: asNullableString(row.payload_json),
     capturedAt: String(row.captured_at),
     createdAt: String(row.created_at),
   };
@@ -472,8 +513,16 @@ function mapEvent(row: Record<string, unknown>): EventLogRecord {
   return {
     id: String(row.id),
     eventType: String(row.event_type),
+    projectId: asNullableString(row.project_id),
+    loopId: asNullableString(row.loop_id),
+    runId: asNullableString(row.run_id),
     entityType: asNullableString(row.entity_type),
     entityId: asNullableString(row.entity_id),
+    correlationId: asNullableString(row.correlation_id),
+    causationId: asNullableString(row.causation_id),
+    actorType: asNullableString(row.actor_type),
+    actorId: asNullableString(row.actor_id),
+    actorDisplayName: asNullableString(row.actor_display_name),
     payloadJson: String(row.payload_json),
     createdAt: String(row.created_at),
   };

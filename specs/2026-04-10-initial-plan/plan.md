@@ -37,20 +37,20 @@
 
 ## 4. 核心领域与状态
 
-- [ ] 定义 `Project`、`Loop`、`Run`、`Task`、`TaskItem`、`PullRequestSnapshot`、`Lock` 类型
-- [ ] 定义 `LoopType`、`LoopStatus`、`RunStatus` 等值对象
-- [ ] 定义 `LoopTarget` 模型（`task` / `pull_request`）
-- [ ] 明确 `Loop` 与 `Run` 的 1:N 关系约束
-- [ ] 明确 Worker / Reviewer / Fixer 各自绑定的 target 类型
-- [ ] 明确 `loops` 表如何表达 task target 与 pull_request target
-- [ ] 明确同一 `project + type + target` 只能有一个 active loop 的约束
-- [ ] 明确 `running -> terminal` 只能发生一次的约束
-- [ ] 明确 MVP 下一个 task 最多关联一个 PR
-- [ ] 明确 MVP 下一个 PR 最多关联一个 task
-- [ ] 明确 Reviewer / Fixer 对同一 PR 保持一对一运行
-- [ ] 明确 PR 锁 key 规则（`pr:{repo}:{pr}`）
-- [ ] 明确 Task 锁 key 规则（`task:{taskId}`）
-- [ ] 实现审计事件追加模型
+- [x] 定义 `Project`、`Loop`、`Run`、`Task`、`TaskItem`、`PullRequestSnapshot`、`Lock` 类型
+- [x] 定义 `LoopType`、`LoopStatus`、`RunStatus` 等值对象
+- [x] 定义 `LoopTarget` 模型（`task` / `pull_request`）
+- [x] 明确 `Loop` 与 `Run` 的 1:N 关系约束
+- [x] 明确 Worker / Reviewer / Fixer 各自绑定的 target 类型
+- [x] 明确 `loops` 表如何表达 task target 与 pull_request target
+- [x] 明确同一 `project + type + target` 只能有一个 active loop 的约束
+- [x] 明确 `running -> terminal` 只能发生一次的约束
+- [x] 明确 MVP 下一个 task 最多关联一个 PR
+- [x] 明确 MVP 下一个 PR 最多关联一个 task
+- [x] 明确 Reviewer / Fixer 对同一 PR 保持一对一运行
+- [x] 明确 PR 锁 key 规则（`pr:{repo}:{pr}`）
+- [x] 明确 Task 锁 key 规则（`task:{taskId}`）
+- [x] 实现审计事件追加模型
 
 ## 5. looperd 启动、恢复与运行时
 
