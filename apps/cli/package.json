@@ -2,9 +2,13 @@
   "name": "@looper/cli",
   "private": true,
   "type": "module",
+  "bin": {
+    "looper": "dist/index.js"
+  },
   "scripts": {
     "dev": "bun run src/index.ts",
     "build": "bun build src/index.ts --outdir dist --target bun",
-    "typecheck": "bun x tsc -p tsconfig.json --noEmit"
+    "typecheck": "bun x tsc -p tsconfig.json --noEmit",
+    "test": "bun test src"
   }
 }

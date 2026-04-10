@@ -1,5 +1,13 @@
 import { randomUUID } from "node:crypto";
 
+import {
+  assertTaskStatusTransition,
+  assertUniqueActiveLoop,
+  createLoop,
+  createTaskItem,
+  definePullRequestLoopTarget,
+  defineTaskLoopTarget,
+} from "../domain/index";
 import type { LooperConfig } from "../config/index";
 import type { Logger } from "../bootstrap/logger";
 import type {
@@ -62,14 +70,6 @@ export function createLooperdApi(context: LooperdApiContext): LooperdApi {
         const url = new URL(request.url);
         const pathname = normalizePathname(url.pathname);
 
-        if (request.method !== "GET") {
-          throw new ApiError(
-            "METHOD_NOT_ALLOWED",
-            405,
-            `Unsupported method for ${pathname}`,
-          );
-        }
-
         if (!pathname.startsWith("/api/v1")) {
           throw new ApiError(
             "ROUTE_NOT_FOUND",
@@ -82,25 +82,51 @@ export function createLooperdApi(context: LooperdApiContext): LooperdApi {
 
         switch (true) {
           case pathname === "/api/v1/healthz":
+            assertMethod(request, ["GET"], pathname);
             data = buildHealthResponse(context);
             break;
           case pathname === "/api/v1/status":
+            assertMethod(request, ["GET"], pathname);
             data = buildStatusResponse(context);
             break;
           case pathname === "/api/v1/config":
+            assertMethod(request, ["GET"], pathname);
             data = buildConfigResponse(context.config);
             break;
           case pathname === "/api/v1/events":
+            assertMethod(request, ["GET"], pathname);
             data = buildEventsResponse(context, url.searchParams);
             break;
           case pathname.startsWith("/api/v1/events/"):
+            assertMethod(request, ["GET"], pathname);
             data = buildEntityEventsResponse(context, pathname);
             break;
           case pathname === "/api/v1/pull-requests":
+            assertMethod(request, ["GET"], pathname);
             data = buildPullRequestsResponse(context);
             break;
           case pathname.startsWith("/api/v1/pull-requests/"):
+            assertMethod(request, ["GET"], pathname);
             data = buildPullRequestRouteResponse(context, pathname);
+            break;
+          case pathname === "/api/v1/loops":
+            data =
+              request.method === "GET"
+                ? buildLoopsResponse(context)
+                : await buildLoopsCreateResponse(context, request);
+            break;
+          case pathname.startsWith("/api/v1/loops/"):
+            data = await buildLoopRouteResponse(context, request, pathname);
+            break;
+          case pathname === "/api/v1/tasks":
+            data = await buildTasksRouteResponse(context, request);
+            break;
+          case pathname.startsWith("/api/v1/tasks/"):
+            data = await buildTaskRouteResponse(context, request, pathname);
+            break;
+          case pathname === "/api/v1/runs":
+            assertMethod(request, ["GET"], pathname);
+            data = buildRunsResponse(context, url.searchParams);
             break;
           default:
             throw new ApiError(
@@ -134,6 +160,22 @@ export function createLooperdApi(context: LooperdApiContext): LooperdApi {
       }
     },
   };
+}
+
+function assertMethod(
+  request: Request,
+  methods: readonly string[],
+  pathname: string,
+): void {
+  if (methods.includes(request.method)) {
+    return;
+  }
+
+  throw new ApiError(
+    "METHOD_NOT_ALLOWED",
+    405,
+    `Unsupported method for ${pathname}`,
+  );
 }
 
 export function createLooperdApiServer(
@@ -346,6 +388,541 @@ function buildPullRequestsResponse(context: LooperdApiContext) {
       serializePullRequest(context, snapshot),
     ),
   };
+}
+
+function buildLoopsResponse(context: LooperdApiContext) {
+  return {
+    items: context.store.loops.list(),
+  };
+}
+
+async function buildLoopRouteResponse(
+  context: LooperdApiContext,
+  request: Request,
+  pathname: string,
+) {
+  const parts = pathname.split("/").filter(Boolean);
+  const loopId = decodeURIComponent(parts[3] ?? "");
+  const subresource = parts[4];
+
+  if (!loopId) {
+    throw new ApiError("VALIDATION_FAILED", 400, "loopId is required");
+  }
+
+  if (!subresource) {
+    assertMethod(request, ["GET"], pathname);
+    const loop = context.store.loops.getById(loopId);
+    if (!loop) {
+      throw new ApiError("LOOP_NOT_FOUND", 404, `Loop not found: ${loopId}`);
+    }
+
+    return loop;
+  }
+
+  if (subresource === "start") {
+    assertMethod(request, ["POST"], pathname);
+    return mutateLoopStatus(context, loopId, "running");
+  }
+
+  if (subresource === "pause") {
+    assertMethod(request, ["POST"], pathname);
+    return mutateLoopStatus(context, loopId, "paused");
+  }
+
+  throw new ApiError("ROUTE_NOT_FOUND", 404, `Unknown route: ${pathname}`);
+}
+
+function mutateLoopStatus(
+  context: LooperdApiContext,
+  loopId: string,
+  status: string,
+) {
+  const loop = context.store.loops.getById(loopId);
+  if (!loop) {
+    throw new ApiError("LOOP_NOT_FOUND", 404, `Loop not found: ${loopId}`);
+  }
+
+  const now = new Date().toISOString();
+  const updated: typeof loop = {
+    ...loop,
+    status,
+    updatedAt: now,
+    ...(status === "running" ? { nextRunAt: now } : {}),
+  };
+  context.store.loops.upsert(updated);
+
+  return updated;
+}
+
+async function buildTasksRouteResponse(
+  context: LooperdApiContext,
+  request: Request,
+) {
+  if (request.method === "GET") {
+    return {
+      items: context.store.tasks
+        .list()
+        .map((task) => serializeTask(context, task)),
+    };
+  }
+
+  if (request.method === "POST") {
+    const body = await parseJsonBody(request);
+    const projectId = readRequiredString(body, "projectId");
+    const title = readRequiredString(body, "title");
+    const project = context.store.projects.getById(projectId);
+    if (!project) {
+      throw new ApiError(
+        "PROJECT_NOT_FOUND",
+        404,
+        `Project not found: ${projectId}`,
+      );
+    }
+
+    const now = new Date().toISOString();
+    const taskId = randomUUID();
+    const specPath = readOptionalString(body, "specPath");
+    const items = readTaskItems(body, taskId, now);
+
+    const task = {
+      id: taskId,
+      projectId,
+      title,
+      description: readOptionalString(body, "description"),
+      status: "pending",
+      loopId: readOptionalString(body, "loopId"),
+      repo: readOptionalString(body, "repo"),
+      prNumber: readOptionalPositiveInteger(body, "prNumber"),
+      metadataJson: specPath ? JSON.stringify({ specPath }) : null,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    context.store.withTransaction((store) => {
+      store.tasks.upsert(task);
+      for (const item of items) {
+        store.taskItems.upsert(item);
+      }
+    });
+
+    return serializeTask(context, context.store.tasks.getById(task.id) ?? task);
+  }
+
+  throw new ApiError(
+    "METHOD_NOT_ALLOWED",
+    405,
+    "Unsupported method for /api/v1/tasks",
+  );
+}
+
+async function buildTaskRouteResponse(
+  context: LooperdApiContext,
+  request: Request,
+  pathname: string,
+) {
+  const parts = pathname.split("/").filter(Boolean);
+  const taskId = decodeURIComponent(parts[3] ?? "");
+  const subresource = parts[4];
+
+  if (!taskId) {
+    throw new ApiError("VALIDATION_FAILED", 400, "taskId is required");
+  }
+
+  if (!subresource) {
+    assertMethod(request, ["GET"], pathname);
+    const task = context.store.tasks.getById(taskId);
+    if (!task) {
+      throw new ApiError("TASK_NOT_FOUND", 404, `Task not found: ${taskId}`);
+    }
+
+    return serializeTask(context, task);
+  }
+
+  if (subresource === "start") {
+    assertMethod(request, ["POST"], pathname);
+    return startTask(context, taskId);
+  }
+
+  if (subresource === "pause") {
+    assertMethod(request, ["POST"], pathname);
+    return pauseTask(context, taskId);
+  }
+
+  throw new ApiError("ROUTE_NOT_FOUND", 404, `Unknown route: ${pathname}`);
+}
+
+function mutateTaskStatus(
+  context: LooperdApiContext,
+  taskId: string,
+  status: string,
+) {
+  const task = context.store.tasks.getById(taskId);
+  if (!task) {
+    throw new ApiError("TASK_NOT_FOUND", 404, `Task not found: ${taskId}`);
+  }
+
+  try {
+    assertTaskStatusTransition(task.status as never, status as never);
+  } catch (error) {
+    throw new ApiError(
+      "INVALID_TASK_TRANSITION",
+      409,
+      error instanceof Error ? error.message : "Invalid task transition",
+    );
+  }
+
+  const updated = {
+    ...task,
+    status,
+    updatedAt: new Date().toISOString(),
+  };
+  context.store.tasks.upsert(updated);
+
+  return updated;
+}
+
+function startTask(context: LooperdApiContext, taskId: string) {
+  const task = context.store.tasks.getById(taskId);
+  if (!task) {
+    throw new ApiError("TASK_NOT_FOUND", 404, `Task not found: ${taskId}`);
+  }
+
+  const now = new Date().toISOString();
+  let loop = task.loopId ? context.store.loops.getById(task.loopId) : null;
+
+  if (!loop) {
+    loop = createLoopRecord({
+      context,
+      projectId: task.projectId,
+      type: "worker",
+      targetType: "task",
+      taskId,
+      status: "running",
+      now,
+    });
+  } else if (loop.status !== "running") {
+    loop = mutateLoopStatus(context, loop.id, "running");
+  }
+
+  const updatedTask = {
+    ...task,
+    loopId: loop.id,
+    status: "in_progress",
+    updatedAt: now,
+  };
+
+  context.store.tasks.upsert(updatedTask);
+  return serializeTask(context, updatedTask);
+}
+
+function pauseTask(context: LooperdApiContext, taskId: string) {
+  const task = mutateTaskStatus(context, taskId, "paused");
+
+  if (task.loopId) {
+    const loop = context.store.loops.getById(task.loopId);
+    if (loop && loop.status !== "paused") {
+      mutateLoopStatus(context, loop.id, "paused");
+    }
+  }
+
+  return serializeTask(context, context.store.tasks.getById(taskId) ?? task);
+}
+
+function buildRunsResponse(
+  context: LooperdApiContext,
+  searchParams: URLSearchParams,
+) {
+  const loopId = searchParams.get("loopId")?.trim();
+
+  return {
+    items: loopId
+      ? context.store.runs.listByLoop(loopId)
+      : context.store.runs.list(),
+  };
+}
+
+async function buildLoopsCreateResponse(
+  context: LooperdApiContext,
+  request: Request,
+) {
+  assertMethod(request, ["POST"], "/api/v1/loops");
+  const body = await parseJsonBody(request);
+  const projectId = readRequiredString(body, "projectId");
+
+  if (!context.store.projects.getById(projectId)) {
+    throw new ApiError(
+      "PROJECT_NOT_FOUND",
+      404,
+      `Project not found: ${projectId}`,
+    );
+  }
+
+  const type = readRequiredString(body, "type");
+  const targetType = readRequiredString(body, "targetType");
+  const status = readOptionalString(body, "status") ?? "running";
+
+  const loop = createLoopRecord({
+    context,
+    projectId,
+    type,
+    targetType,
+    taskId: readOptionalString(body, "taskId") ?? undefined,
+    repo: readOptionalString(body, "repo") ?? undefined,
+    prNumber: readOptionalPositiveInteger(body, "prNumber") ?? undefined,
+    status,
+    now: new Date().toISOString(),
+  });
+
+  return loop;
+}
+
+function createLoopRecord(input: {
+  context: LooperdApiContext;
+  projectId: string;
+  type: string;
+  targetType: string;
+  taskId?: string;
+  repo?: string;
+  prNumber?: number;
+  status: string;
+  now: string;
+}) {
+  const { context } = input;
+  const target =
+    input.targetType === "task"
+      ? defineTaskLoopTarget(readRequiredValue(input.taskId, "taskId"))
+      : definePullRequestLoopTarget(
+          readRequiredValue(input.repo, "repo"),
+          readRequiredNumber(input.prNumber, "prNumber"),
+        );
+
+  const loop = createLoop({
+    id: randomUUID(),
+    projectId: input.projectId,
+    type: input.type as never,
+    target,
+    status: input.status as never,
+    createdAt: input.now,
+    updatedAt: input.now,
+  });
+
+  const existingLoops = context.store.loops.list().map((candidate) => ({
+    id: candidate.id,
+    projectId: candidate.projectId,
+    type: candidate.type as never,
+    status: candidate.status as never,
+    target: toLoopTarget(candidate),
+  }));
+
+  try {
+    assertUniqueActiveLoop({
+      loops: existingLoops,
+      candidate: loop,
+    });
+  } catch (error) {
+    throw new ApiError(
+      "LOOP_CONFLICT",
+      409,
+      error instanceof Error ? error.message : "Active loop already exists",
+    );
+  }
+
+  const record = {
+    id: loop.id,
+    projectId: loop.projectId,
+    type: loop.type,
+    targetType: target.targetType,
+    targetId:
+      target.targetType === "task"
+        ? `task:${target.taskId}`
+        : `pr:${target.repo}:${target.prNumber}`,
+    repo: target.targetType === "pull_request" ? target.repo : null,
+    prNumber: target.targetType === "pull_request" ? target.prNumber : null,
+    status: loop.status,
+    configJson: null,
+    metadataJson: null,
+    lastRunAt: null,
+    nextRunAt: loop.status === "running" ? input.now : null,
+    createdAt: input.now,
+    updatedAt: input.now,
+  };
+
+  context.store.loops.upsert(record);
+  return record;
+}
+
+function serializeTask(
+  context: LooperdApiContext,
+  task: ReturnType<Store["tasks"]["getById"]> extends infer T
+    ? Exclude<T, null>
+    : never,
+) {
+  const metadata = parsePayloadJson(task.metadataJson ?? "null") as Record<
+    string,
+    unknown
+  > | null;
+
+  return {
+    ...task,
+    specPath: typeof metadata?.specPath === "string" ? metadata.specPath : null,
+    items: context.store.taskItems.listByTask(task.id),
+  };
+}
+
+function toLoopTarget(loop: ReturnType<Store["loops"]["list"]>[number]) {
+  if (loop.targetType === "task") {
+    const taskId =
+      loop.targetId?.startsWith("task:") === true
+        ? loop.targetId.slice("task:".length)
+        : loop.targetId;
+
+    return defineTaskLoopTarget(
+      readRequiredValue(taskId ?? undefined, "taskId"),
+    );
+  }
+
+  return definePullRequestLoopTarget(
+    readRequiredValue(loop.repo ?? undefined, "repo"),
+    readRequiredNumber(loop.prNumber ?? undefined, "prNumber"),
+  );
+}
+
+function readTaskItems(
+  body: Record<string, unknown>,
+  taskId: string,
+  now: string,
+) {
+  const raw = body.items;
+  if (raw == null) {
+    return [];
+  }
+
+  if (!Array.isArray(raw)) {
+    throw new ApiError("VALIDATION_FAILED", 400, "items must be an array");
+  }
+
+  return raw.map((value, index) => {
+    if (typeof value !== "string" || value.trim().length === 0) {
+      throw new ApiError(
+        "VALIDATION_FAILED",
+        400,
+        `items[${index}] must be a non-empty string`,
+      );
+    }
+
+    return createTaskItem({
+      id: randomUUID(),
+      taskId,
+      content: value.trim(),
+      status: "pending",
+      position: index,
+      source: "user",
+      createdAt: now,
+      updatedAt: now,
+    });
+  });
+}
+
+function readRequiredValue(
+  value: string | undefined,
+  fieldName: string,
+): string {
+  if (!value) {
+    throw new ApiError("VALIDATION_FAILED", 400, `${fieldName} is required`);
+  }
+
+  return value;
+}
+
+function readRequiredNumber(
+  value: number | undefined,
+  fieldName: string,
+): number {
+  if (!value) {
+    throw new ApiError("VALIDATION_FAILED", 400, `${fieldName} is required`);
+  }
+
+  return value;
+}
+
+async function parseJsonBody(
+  request: Request,
+): Promise<Record<string, unknown>> {
+  try {
+    const body = await request.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new ApiError(
+        "VALIDATION_FAILED",
+        400,
+        "request body must be a JSON object",
+      );
+    }
+
+    return body as Record<string, unknown>;
+  } catch (error) {
+    if (error instanceof ApiError) {
+      throw error;
+    }
+
+    throw new ApiError("VALIDATION_FAILED", 400, "invalid JSON request body");
+  }
+}
+
+function readRequiredString(
+  body: Record<string, unknown>,
+  fieldName: string,
+): string {
+  const value = body[fieldName];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new ApiError(
+      "VALIDATION_FAILED",
+      400,
+      `${fieldName} must be a non-empty string`,
+    );
+  }
+
+  return value.trim();
+}
+
+function readOptionalString(
+  body: Record<string, unknown>,
+  fieldName: string,
+): string | null {
+  const value = body[fieldName];
+  if (value == null) {
+    return null;
+  }
+
+  if (typeof value !== "string") {
+    throw new ApiError(
+      "VALIDATION_FAILED",
+      400,
+      `${fieldName} must be a string`,
+    );
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function readOptionalPositiveInteger(
+  body: Record<string, unknown>,
+  fieldName: string,
+): number | null {
+  const value = body[fieldName];
+  if (value == null) {
+    return null;
+  }
+
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new ApiError(
+      "VALIDATION_FAILED",
+      400,
+      `${fieldName} must be a positive integer`,
+    );
+  }
+
+  return value as number;
 }
 
 function buildPullRequestRouteResponse(

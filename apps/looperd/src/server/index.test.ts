@@ -79,6 +79,17 @@ async function createFixture() {
     createdAt: now,
     updatedAt: now,
   });
+  store.taskItems.upsert({
+    id: "task_item_1",
+    taskId: "task_1",
+    content: "Ship API routes",
+    status: "in_progress",
+    position: 1,
+    source: "user",
+    metadataJson: null,
+    createdAt: now,
+    updatedAt: now,
+  });
   store.pullRequestSnapshots.upsert({
     id: "snapshot_1",
     projectId: "project_1",
@@ -184,6 +195,181 @@ describe("createLooperdApi", () => {
       data: { loopStatus: { latestRunStatus: string } };
     };
     expect(prStatusBody.data.loopStatus.latestRunStatus).toBe("running");
+
+    store.close();
+    await rm(rootDir, { recursive: true, force: true });
+  });
+
+  test("returns loop, task, and run read routes", async () => {
+    const { api, store, rootDir } = await createFixture();
+
+    const loopsResponse = await api.handle(
+      new Request("http://localhost/api/v1/loops"),
+    );
+    const loopsBody = (await loopsResponse.json()) as {
+      data: { items: Array<{ id: string }> };
+    };
+    expect(loopsResponse.status).toBe(200);
+    expect(loopsBody.data.items[0]?.id).toBe("loop_1");
+
+    const loopResponse = await api.handle(
+      new Request("http://localhost/api/v1/loops/loop_1"),
+    );
+    const loopBody = (await loopResponse.json()) as {
+      data: { id: string; status: string };
+    };
+    expect(loopBody.data.id).toBe("loop_1");
+    expect(loopBody.data.status).toBe("running");
+
+    const tasksResponse = await api.handle(
+      new Request("http://localhost/api/v1/tasks"),
+    );
+    const tasksBody = (await tasksResponse.json()) as {
+      data: { items: Array<{ id: string }> };
+    };
+    expect(tasksResponse.status).toBe(200);
+    expect(tasksBody.data.items[0]?.id).toBe("task_1");
+
+    const taskResponse = await api.handle(
+      new Request("http://localhost/api/v1/tasks/task_1"),
+    );
+    const taskBody = (await taskResponse.json()) as {
+      data: { id: string; items: Array<{ id: string }> };
+    };
+    expect(taskBody.data.id).toBe("task_1");
+    expect(taskBody.data.items[0]?.id).toBe("task_item_1");
+
+    const runsResponse = await api.handle(
+      new Request("http://localhost/api/v1/runs"),
+    );
+    const runsBody = (await runsResponse.json()) as {
+      data: { items: Array<{ id: string }> };
+    };
+    expect(runsResponse.status).toBe(200);
+    expect(runsBody.data.items[0]?.id).toBe("run_1");
+
+    const filteredRunsResponse = await api.handle(
+      new Request("http://localhost/api/v1/runs?loopId=loop_1"),
+    );
+    const filteredRunsBody = (await filteredRunsResponse.json()) as {
+      data: { items: Array<{ loopId: string }> };
+    };
+    expect(filteredRunsBody.data.items).toHaveLength(1);
+    expect(filteredRunsBody.data.items[0]?.loopId).toBe("loop_1");
+
+    store.close();
+    await rm(rootDir, { recursive: true, force: true });
+  });
+
+  test("supports loop and task mutation routes", async () => {
+    const { api, store, rootDir } = await createFixture();
+
+    const pauseLoopResponse = await api.handle(
+      new Request("http://localhost/api/v1/loops/loop_1/pause", {
+        method: "POST",
+      }),
+    );
+    const pauseLoopBody = (await pauseLoopResponse.json()) as {
+      data: { status: string };
+    };
+    expect(pauseLoopResponse.status).toBe(200);
+    expect(pauseLoopBody.data.status).toBe("paused");
+
+    const startLoopResponse = await api.handle(
+      new Request("http://localhost/api/v1/loops/loop_1/start", {
+        method: "POST",
+      }),
+    );
+    const startLoopBody = (await startLoopResponse.json()) as {
+      data: { status: string };
+    };
+    expect(startLoopBody.data.status).toBe("running");
+
+    const createTaskResponse = await api.handle(
+      new Request("http://localhost/api/v1/tasks", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: "project_1",
+          title: "Implement CLI route",
+          description: "Create API endpoint",
+          specPath: "specs/cli.md",
+          items: ["wire client", "add tests"],
+        }),
+      }),
+    );
+    const createTaskBody = (await createTaskResponse.json()) as {
+      data: {
+        id: string;
+        status: string;
+        title: string;
+        specPath: string;
+        items: Array<{ id: string }>;
+      };
+    };
+    expect(createTaskResponse.status).toBe(200);
+    expect(createTaskBody.data.status).toBe("pending");
+    expect(createTaskBody.data.title).toBe("Implement CLI route");
+    expect(createTaskBody.data.specPath).toBe("specs/cli.md");
+    expect(createTaskBody.data.items).toHaveLength(2);
+
+    const startedTaskResponse = await api.handle(
+      new Request(
+        `http://localhost/api/v1/tasks/${createTaskBody.data.id}/start`,
+        {
+          method: "POST",
+        },
+      ),
+    );
+    const startedTaskBody = (await startedTaskResponse.json()) as {
+      data: { status: string; loopId: string | null };
+    };
+    expect(startedTaskBody.data.status).toBe("in_progress");
+    expect(startedTaskBody.data.loopId).toBeTruthy();
+
+    const pausedTaskResponse = await api.handle(
+      new Request(
+        `http://localhost/api/v1/tasks/${createTaskBody.data.id}/pause`,
+        {
+          method: "POST",
+        },
+      ),
+    );
+    const pausedTaskBody = (await pausedTaskResponse.json()) as {
+      data: { status: string };
+    };
+    expect(pausedTaskBody.data.status).toBe("paused");
+
+    const validationResponse = await api.handle(
+      new Request("http://localhost/api/v1/tasks", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: "project_1", title: "" }),
+      }),
+    );
+    expect(validationResponse.status).toBe(400);
+
+    const createLoopResponse = await api.handle(
+      new Request("http://localhost/api/v1/loops", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: "project_1",
+          type: "fixer",
+          targetType: "pull_request",
+          repo: "acme/looper",
+          prNumber: 43,
+        }),
+      }),
+    );
+    const createLoopBody = (await createLoopResponse.json()) as {
+      data: { type: string; repo: string; prNumber: number; status: string };
+    };
+    expect(createLoopResponse.status).toBe(200);
+    expect(createLoopBody.data.type).toBe("fixer");
+    expect(createLoopBody.data.repo).toBe("acme/looper");
+    expect(createLoopBody.data.prNumber).toBe(43);
+    expect(createLoopBody.data.status).toBe("running");
 
     store.close();
     await rm(rootDir, { recursive: true, force: true });

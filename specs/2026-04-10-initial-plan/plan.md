@@ -82,22 +82,22 @@
 
 ## 7. CLI 基础
 
-- [ ] 实现 `looper status`
-- [ ] 实现 `looper config show`
-- [ ] 实现 `looper daemon status`
-- [ ] 实现 `looper daemon logs`
-- [ ] 实现 `looper loop list`
-- [ ] 实现 `looper loop start`
-- [ ] 实现 `looper loop pause`
-- [ ] 实现 `looper task create`
-- [ ] 实现 `looper task start`
-- [ ] 实现 `looper task pause`
-- [ ] 实现 `looper task status`
-- [ ] 实现 `looper task show`
-- [ ] 实现 `looper pr list`
-- [ ] 实现 `looper pr show`
-- [ ] 实现 `looper pr status`
-- [ ] 实现 `looper run list`
+- [x] 实现 `looper status`
+- [x] 实现 `looper config show`
+- [x] 实现 `looper daemon status`
+- [x] 实现 `looper daemon logs`
+- [x] 实现 `looper loop list`
+- [x] 实现 `looper loop start`
+- [x] 实现 `looper loop pause`
+- [x] 实现 `looper task create`
+- [x] 实现 `looper task start`
+- [x] 实现 `looper task pause`
+- [x] 实现 `looper task status`
+- [x] 实现 `looper task show`
+- [x] 实现 `looper pr list`
+- [x] 实现 `looper pr show`
+- [x] 实现 `looper pr status`
+- [x] 实现 `looper run list`
 
 ## 8. 外部集成基础
 
