@@ -13,6 +13,8 @@ export {
 } from "./command";
 export {
   GhCliGitHubGateway,
+  type CreatePullRequestInput,
+  type CreatePullRequestResult,
   type GitHubPullRequestDetail,
   type GitHubPullRequestSummary,
   type SubmitReviewInput,

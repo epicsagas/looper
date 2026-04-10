@@ -13,6 +13,7 @@ export {
   type LoggingConfig,
   type LooperConfig,
   type NotificationConfig,
+  type OpenPrStrategy,
   type PackageConfig,
   type ProjectRefConfig,
   type SchedulerConfig,

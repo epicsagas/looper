@@ -163,17 +163,17 @@
 
 ## 11. Worker Loop（MVP 基础版）
 
-- [ ] 实现 worker `prepare-task`
-- [ ] 实现 worker `prepare-worktree`
-- [ ] 实现 worker `plan-step`
-- [ ] 实现 worker `execute-step`
-- [ ] 实现 worker `validate-step`
-- [ ] 实现 worker `sync-checklist`
-- [ ] 实现 worker `open-pr`
-- [ ] 实现 `openPrStrategy`（`all_done` / `first_commit` / `manual`）
-- [ ] 实现 checklist slice -> run 的迭代模型
-- [ ] 实现 worker 的 worktree 生命周期管理
-- [ ] 实现 worker 的 PR 创建流程
+- [x] 实现 worker `prepare-task`
+- [x] 实现 worker `prepare-worktree`
+- [x] 实现 worker `plan-step`
+- [x] 实现 worker `execute-step`
+- [x] 实现 worker `validate-step`
+- [x] 实现 worker `sync-checklist`
+- [x] 实现 worker `open-pr`
+- [x] 实现 `openPrStrategy`（`all_done` / `first_commit` / `manual`）
+- [x] 实现 checklist slice -> run 的迭代模型
+- [x] 实现 worker 的 worktree 生命周期管理
+- [x] 实现 worker 的 PR 创建流程
 
 ## 12. Fixer Loop（第一阶段基础版）
 
@@ -215,7 +215,7 @@
 - [ ] 为锁语义写测试
 - [ ] 为 scheduler 重试与退避写测试
 - [x] 为 reviewer loop 第一条链路写集成测试
-- [ ] 为 worker 基础链路写集成测试
+- [x] 为 worker 基础链路写集成测试
 - [ ] 为 fixer 基础链路写集成测试
 - [ ] 为恢复流程写测试
 - [ ] 为 agent timeout / kill 写测试

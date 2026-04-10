@@ -195,6 +195,19 @@ export class GitWorktreeGateway {
     }
   }
 
+  public async push(input: {
+    worktreePath: string;
+    branch: string;
+    remote?: string;
+    protectedBranches?: string[];
+  }): Promise<void> {
+    this.assertWritableBranch(input.branch, input.protectedBranches ?? []);
+    await this.runGit(
+      ["push", "-u", input.remote ?? "origin", input.branch],
+      input.worktreePath,
+    );
+  }
+
   public assertWritableBranch(
     branch: string,
     protectedBranches: string[],

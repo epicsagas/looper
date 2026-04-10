@@ -38,6 +38,20 @@ export interface SubmitReviewInput {
   cwd?: string;
 }
 
+export interface CreatePullRequestInput {
+  repo: string;
+  headBranch: string;
+  baseBranch: string;
+  title: string;
+  body?: string;
+  cwd?: string;
+}
+
+export interface CreatePullRequestResult {
+  number?: number;
+  url: string;
+}
+
 export class GhCliGitHubGateway {
   private readonly now: () => Date;
 
@@ -172,6 +186,40 @@ export class GhCliGitHubGateway {
     await this.runGh(args, input.cwd);
   }
 
+  public async createPullRequest(
+    input: CreatePullRequestInput,
+  ): Promise<CreatePullRequestResult> {
+    const result = await this.runGh(
+      [
+        "pr",
+        "create",
+        "--repo",
+        input.repo,
+        "--head",
+        input.headBranch,
+        "--base",
+        input.baseBranch,
+        "--title",
+        input.title,
+        "--body",
+        input.body ?? "",
+      ],
+      input.cwd,
+    );
+
+    const url = result.stdout.trim();
+    if (!url) {
+      throw new CommandExecutionError("gh pr create returned an empty URL", {
+        ...result,
+      });
+    }
+
+    return {
+      url,
+      number: parsePrNumberFromUrl(url),
+    };
+  }
+
   public async capturePullRequestSnapshot(input: {
     projectId: string;
     repo: string;
@@ -292,4 +340,14 @@ function extractAuthor(value: unknown): string | undefined {
 
   const author = value as Record<string, unknown>;
   return asOptionalString(author.login) ?? asOptionalString(author.name);
+}
+
+function parsePrNumberFromUrl(url: string): number | undefined {
+  const match = url.match(/\/pull\/(\d+)(?:\/|$)/);
+  if (!match) {
+    return undefined;
+  }
+
+  const value = Number(match[1]);
+  return Number.isInteger(value) && value > 0 ? value : undefined;
 }
