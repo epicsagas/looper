@@ -54,31 +54,31 @@
 
 ## 5. looperd 启动、恢复与运行时
 
-- [/] 实现 `looperd` runtime 启动流程
-- [ ] 实现启动时自动 migration
-- [ ] 实现恢复流程：清理 orphan agent process
-- [ ] 实现恢复流程：清理过期锁
-- [ ] 实现恢复流程：标记中断 run
-- [ ] 实现恢复流程：校正 queue / loop 状态
-- [ ] 实现恢复事件写入
-- [ ] 实现进程停止流程
-- [ ] 实现 agent 子进程清理流程
+- [x] 实现 `looperd` runtime 启动流程
+- [x] 实现启动时自动 migration
+- [x] 实现恢复流程：清理 orphan agent process
+- [x] 实现恢复流程：清理过期锁
+- [x] 实现恢复流程：标记中断 run
+- [x] 实现恢复流程：校正 queue / loop 状态
+- [x] 实现恢复事件写入
+- [x] 实现进程停止流程
+- [x] 实现 agent 子进程清理流程
 
 ## 6. HTTP API 基础
 
-- [/] 搭建 Bun HTTP server
-- [ ] 实现统一 `/api/v1` 路由前缀
-- [ ] 实现统一 API response envelope
-- [ ] 实现 `GET /api/v1/healthz`
-- [ ] 实现 `GET /api/v1/status`
-- [ ] 实现 `GET /api/v1/config`
-- [ ] 实现 `GET /api/v1/events`
-- [ ] 实现 `GET /api/v1/events/:entityType/:entityId`
-- [ ] 实现 `GET /api/v1/pull-requests`
-- [ ] 实现 `GET /api/v1/pull-requests/:repo/:prNumber`
-- [ ] 实现 `GET /api/v1/pull-requests/:repo/:prNumber/status`
-- [ ] 实现基础错误码映射
-- [ ] 预留本地 token 鉴权但允许 MVP 先本机运行
+- [x] 搭建 Bun HTTP server
+- [x] 实现统一 `/api/v1` 路由前缀
+- [x] 实现统一 API response envelope
+- [x] 实现 `GET /api/v1/healthz`
+- [x] 实现 `GET /api/v1/status`
+- [x] 实现 `GET /api/v1/config`
+- [x] 实现 `GET /api/v1/events`
+- [x] 实现 `GET /api/v1/events/:entityType/:entityId`
+- [x] 实现 `GET /api/v1/pull-requests`
+- [x] 实现 `GET /api/v1/pull-requests/:repo/:prNumber`
+- [x] 实现 `GET /api/v1/pull-requests/:repo/:prNumber/status`
+- [x] 实现基础错误码映射
+- [x] 预留本地 token 鉴权但允许 MVP 先本机运行
 
 ## 7. CLI 基础
 

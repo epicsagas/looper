@@ -29,6 +29,7 @@ export interface Store {
   runs: {
     upsert(record: RunRecord): void;
     getById(id: string): RunRecord | null;
+    list(): RunRecord[];
     listByLoop(loopId: string): RunRecord[];
   };
 
@@ -46,11 +47,13 @@ export interface Store {
 
   pullRequestSnapshots: {
     upsert(record: PullRequestSnapshotRecord): void;
+    list(): PullRequestSnapshotRecord[];
     getLatest(repo: string, prNumber: number): PullRequestSnapshotRecord | null;
   };
 
   events: {
     append(record: EventLogRecord): void;
+    list(limit?: number): EventLogRecord[];
     listByEntity(entityType: string, entityId: string): EventLogRecord[];
   };
 

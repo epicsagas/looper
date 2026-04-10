@@ -172,6 +172,12 @@ export class SqliteStore implements Store {
         .get(id) as Record<string, unknown> | null;
       return row ? mapRun(row) : null;
     },
+    list: (): RunRecord[] => {
+      const rows = this.coordinator.db
+        .query("SELECT * FROM runs ORDER BY started_at DESC")
+        .all() as Record<string, unknown>[];
+      return rows.map(mapRun);
+    },
     listByLoop: (loopId: string): RunRecord[] => {
       const rows = this.coordinator.db
         .query("SELECT * FROM runs WHERE loop_id = ?1 ORDER BY started_at DESC")
@@ -309,6 +315,14 @@ export class SqliteStore implements Store {
           record.createdAt,
         );
     },
+    list: (): PullRequestSnapshotRecord[] => {
+      return this.coordinator.db
+        .query(
+          "SELECT * FROM pull_request_snapshots ORDER BY captured_at DESC, created_at DESC",
+        )
+        .all()
+        .map((row) => mapPullRequestSnapshot(row as Record<string, unknown>));
+    },
     getLatest: (
       repo: string,
       prNumber: number,
@@ -344,6 +358,12 @@ export class SqliteStore implements Store {
           record.payloadJson,
           record.createdAt,
         );
+    },
+    list: (limit = 100): EventLogRecord[] => {
+      return this.coordinator.db
+        .query("SELECT * FROM event_logs ORDER BY created_at DESC LIMIT ?1")
+        .all(limit)
+        .map((row) => mapEvent(row as Record<string, unknown>));
     },
     listByEntity: (entityType: string, entityId: string): EventLogRecord[] => {
       return this.coordinator.db
