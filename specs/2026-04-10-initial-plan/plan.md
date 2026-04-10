@@ -54,7 +54,7 @@
 
 ## 5. looperd 启动、恢复与运行时
 
-- [ ] 实现 `looperd` runtime 启动流程
+- [/] 实现 `looperd` runtime 启动流程
 - [ ] 实现启动时自动 migration
 - [ ] 实现恢复流程：清理 orphan agent process
 - [ ] 实现恢复流程：清理过期锁
@@ -66,7 +66,7 @@
 
 ## 6. HTTP API 基础
 
-- [ ] 搭建 Bun HTTP server
+- [/] 搭建 Bun HTTP server
 - [ ] 实现统一 `/api/v1` 路由前缀
 - [ ] 实现统一 API response envelope
 - [ ] 实现 `GET /api/v1/healthz`
