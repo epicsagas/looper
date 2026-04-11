@@ -902,7 +902,10 @@ function validateTaskStartPrerequisites(
     string,
     unknown
   > | null;
-  if (typeof metadata?.specPath !== "string" || metadata.specPath.length === 0) {
+  if (
+    typeof metadata?.specPath !== "string" ||
+    metadata.specPath.length === 0
+  ) {
     throw new ApiError(
       "VALIDATION_FAILED",
       400,

@@ -734,7 +734,10 @@ class BasicLooperdRuntime implements LooperdRuntime {
     if (claimed.type === "reviewer" && this.reviewerRunner) {
       try {
         const result = await this.reviewerRunner.processClaimedItem(claimed);
-        if (result.status === "failed" && shouldNotifyRunFailure(claimed.type, result)) {
+        if (
+          result.status === "failed" &&
+          shouldNotifyRunFailure(claimed.type, result)
+        ) {
           void this.notifySystemEvent({
             projectId: claimed.projectId ?? undefined,
             loopId: result.loopId,
@@ -768,7 +771,10 @@ class BasicLooperdRuntime implements LooperdRuntime {
     if (claimed.type === "fixer" && this.fixerRunner) {
       try {
         const result = await this.fixerRunner.processClaimedItem(claimed);
-        if (result.status === "failed" && shouldNotifyRunFailure(claimed.type, result)) {
+        if (
+          result.status === "failed" &&
+          shouldNotifyRunFailure(claimed.type, result)
+        ) {
           void this.notifySystemEvent({
             projectId: claimed.projectId ?? undefined,
             loopId: result.loopId,
@@ -802,7 +808,10 @@ class BasicLooperdRuntime implements LooperdRuntime {
     if (claimed.type === "worker" && this.workerRunner) {
       try {
         const result = await this.workerRunner.processClaimedItem(claimed);
-        if (result.status === "failed" && shouldNotifyRunFailure(claimed.type, result)) {
+        if (
+          result.status === "failed" &&
+          shouldNotifyRunFailure(claimed.type, result)
+        ) {
           void this.notifySystemEvent({
             projectId: claimed.projectId ?? undefined,
             loopId: result.loopId,

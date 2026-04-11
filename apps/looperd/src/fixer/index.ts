@@ -1711,7 +1711,7 @@ export class FixerLoopRunner {
   }): Promise<void> {
     let actualHeadSha: string | undefined;
     for (let attempt = 0; attempt < input.attempts; attempt += 1) {
-      let currentPr;
+      let currentPr: GitHubPullRequestDetail;
       try {
         currentPr = await this.options.github.viewPullRequest({
           repo: input.repo,

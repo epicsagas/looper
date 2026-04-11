@@ -469,13 +469,14 @@ describe("createLooperdApi", () => {
     };
     expect(startedTaskBody.data.status).toBe("in_progress");
     expect(startedTaskBody.data.loopId).toBeTruthy();
-    expect(store.queue.findActiveByDedupe(`worker:${createTaskBody.data.id}`))
-      .toMatchObject({
-        loopId: startedTaskBody.data.loopId,
-        taskId: createTaskBody.data.id,
-        type: "worker",
-        status: "queued",
-      });
+    expect(
+      store.queue.findActiveByDedupe(`worker:${createTaskBody.data.id}`),
+    ).toMatchObject({
+      loopId: startedTaskBody.data.loopId,
+      taskId: createTaskBody.data.id,
+      type: "worker",
+      status: "queued",
+    });
 
     const pausedTaskResponse = await api.handle(
       new Request(
@@ -603,9 +604,12 @@ describe("createLooperdApi", () => {
     });
 
     const response = await api.handle(
-      new Request("http://localhost/api/v1/tasks/task_missing_preflight/start", {
-        method: "POST",
-      }),
+      new Request(
+        "http://localhost/api/v1/tasks/task_missing_preflight/start",
+        {
+          method: "POST",
+        },
+      ),
     );
     const body = (await response.json()) as {
       error: { code: string; message: string };
@@ -614,13 +618,17 @@ describe("createLooperdApi", () => {
     expect(response.status).toBe(400);
     expect(body.error.code).toBe("VALIDATION_FAILED");
     expect(body.error.message).toContain("must define repo");
-    expect(store.tasks.getById("task_missing_preflight")?.status).toBe("pending");
+    expect(store.tasks.getById("task_missing_preflight")?.status).toBe(
+      "pending",
+    );
     expect(
       store.loops
         .list()
         .some((loop) => loop.targetId === "task:task_missing_preflight"),
     ).toBe(false);
-    expect(store.queue.findActiveByDedupe("worker:task_missing_preflight")).toBeNull();
+    expect(
+      store.queue.findActiveByDedupe("worker:task_missing_preflight"),
+    ).toBeNull();
 
     store.close();
     await rm(rootDir, { recursive: true, force: true });
@@ -677,13 +685,14 @@ describe("createLooperdApi", () => {
       targetId: "task:task_reuses_wrong_loop",
       status: "running",
     });
-    expect(store.queue.findActiveByDedupe("worker:task_reuses_wrong_loop"))
-      .toMatchObject({
-        loopId: body.data.loopId,
-        taskId: "task_reuses_wrong_loop",
-        type: "worker",
-        status: "queued",
-      });
+    expect(
+      store.queue.findActiveByDedupe("worker:task_reuses_wrong_loop"),
+    ).toMatchObject({
+      loopId: body.data.loopId,
+      taskId: "task_reuses_wrong_loop",
+      type: "worker",
+      status: "queued",
+    });
 
     store.close();
     await rm(rootDir, { recursive: true, force: true });
