@@ -69,6 +69,39 @@ interface PullRequestRef {
   prNumber: number;
 }
 
+interface ActiveRunItem {
+  runId: string;
+  loopId: string;
+  projectId: string;
+  type: string;
+  status: string;
+  currentStep: string | null;
+  startedAt: string;
+  target:
+    | {
+        type: "task";
+        taskId: string;
+        label: string;
+      }
+    | {
+        type: "pull_request";
+        repo: string;
+        prNumber: number;
+        label: string;
+      };
+  agent: {
+    active: true;
+    activeCount: number;
+    executionId: string;
+    vendor: string;
+    pid: number | null;
+    startedAt: string;
+    lastHeartbeatAt: string | null;
+    heartbeatCount: number;
+    status: string;
+  } | null;
+}
+
 const CONFIG_FLAGS = new Set([
   "config",
   "host",
@@ -215,6 +248,8 @@ async function dispatch(context: CliContext): Promise<void> {
       }
       context.showHelp("run");
       return;
+    case "ps":
+      return runPs(context);
     default:
       break;
   }
@@ -307,6 +342,16 @@ function createCli(runtime: CliRuntime) {
     });
 
   cli
+    .command("ps", "Show running loops")
+    .option("--type <type>", "Filter by loop type")
+    .option("--project <projectId>", "Filter by project id")
+    .example((name) => `  $ ${name} ps`)
+    .example((name) => `  $ ${name} ps --type reviewer --project project_1`)
+    .action(async (options) => {
+      await dispatch(createContext(runtime, ["ps"], options));
+    });
+
+  cli
     .command("run [...args]", "Run commands")
     .usage("run <subcommand> [options]")
     .option("--loop <loopId>", "Filter by loop id")
@@ -359,7 +404,7 @@ function outputCommandHelp(
 function createContext(
   runtime: CliRuntime,
   positionals: string[],
-  options: Record<string, unknown>,
+  options?: Record<string, unknown>,
 ): CliContext {
   return {
     ...runtime,
@@ -369,11 +414,11 @@ function createContext(
 
 function buildParsedArgs(
   positionals: string[],
-  options: Record<string, unknown>,
+  options?: Record<string, unknown>,
 ): ParsedArgs {
   const flags = new Map<string, string[]>();
 
-  for (const [name, value] of Object.entries(options)) {
+  for (const [name, value] of Object.entries(options ?? {})) {
     if (value === undefined || value === false || name === "--") {
       continue;
     }
@@ -890,6 +935,76 @@ async function runRunList(context: CliContext) {
       startedAt: run.startedAt as string,
     })),
   );
+}
+
+async function runPs(context: CliContext) {
+  const searchParams = new URLSearchParams();
+  const type = getFlag(context.args, "type");
+  const projectId = getFlag(context.args, "project");
+
+  if (type) {
+    searchParams.set("type", type);
+  }
+  if (projectId) {
+    searchParams.set("projectId", projectId);
+  }
+
+  const query = searchParams.toString();
+  const path = query ? `/api/v1/runs/active?${query}` : "/api/v1/runs/active";
+  const data = await context.client.get<{ items: ActiveRunItem[] }>(path);
+
+  if (hasFlag(context.args, "json")) {
+    return printJson(context.write, data);
+  }
+
+  if (data.items.length === 0) {
+    context.write("No running loops.");
+    return;
+  }
+
+  printTable(
+    context.write,
+    data.items.map((item) => ({
+      type: item.type,
+      target: item.target.label,
+      run: item.runId,
+      step: item.currentStep ?? "-",
+      agent: item.agent?.vendor ?? "-",
+      pid: item.agent?.pid ?? "-",
+      status: item.status,
+      age: formatRelativeAge(item.startedAt),
+    })),
+  );
+}
+
+function formatRelativeAge(startedAt: string): string {
+  const started = Date.parse(startedAt);
+  if (Number.isNaN(started)) {
+    return "-";
+  }
+
+  const diffMs = Math.max(Date.now() - started, 0);
+  const totalMinutes = Math.floor(diffMs / 60_000);
+  if (totalMinutes < 1) {
+    return "<1m";
+  }
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m`;
+  }
+
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) {
+    const remainingMinutes = totalMinutes % 60;
+    return remainingMinutes === 0
+      ? `${totalHours}h`
+      : `${totalHours}h${remainingMinutes}m`;
+  }
+
+  const totalDays = Math.floor(totalHours / 24);
+  const remainingHours = totalHours % 24;
+  return remainingHours === 0
+    ? `${totalDays}d`
+    : `${totalDays}d${remainingHours}h`;
 }
 
 function emitTaskResult(
