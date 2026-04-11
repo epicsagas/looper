@@ -740,6 +740,50 @@ describe("createLooperdApi", () => {
     expect(invalidStatusBody.error.code).toBe("VALIDATION_FAILED");
     expect(invalidStatusBody.error.message).toContain("status must be one of");
 
+    const invalidTargetTypeResponse = await api.handle(
+      new Request("http://localhost/api/v1/loops", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: "project_1",
+          type: "worker",
+          targetType: "invalid",
+          taskId: "task_1",
+        }),
+      }),
+    );
+    const invalidTargetTypeBody = (await invalidTargetTypeResponse.json()) as {
+      error: { code: string; message: string };
+    };
+    expect(invalidTargetTypeResponse.status).toBe(400);
+    expect(invalidTargetTypeBody.error.code).toBe("VALIDATION_FAILED");
+    expect(invalidTargetTypeBody.error.message).toContain(
+      "targetType must be one of",
+    );
+
+    const incompatibleTargetTypeResponse = await api.handle(
+      new Request("http://localhost/api/v1/loops", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: "project_1",
+          type: "worker",
+          targetType: "pull_request",
+          repo: "acme/looper",
+          prNumber: 42,
+        }),
+      }),
+    );
+    const incompatibleTargetTypeBody =
+      (await incompatibleTargetTypeResponse.json()) as {
+        error: { code: string; message: string };
+      };
+    expect(incompatibleTargetTypeResponse.status).toBe(400);
+    expect(incompatibleTargetTypeBody.error.code).toBe("VALIDATION_FAILED");
+    expect(incompatibleTargetTypeBody.error.message).toContain(
+      "worker loops must target a task",
+    );
+
     store.close();
     await rm(rootDir, { recursive: true, force: true });
   });
@@ -819,6 +863,50 @@ describe("createLooperdApi", () => {
       }),
     );
     expect(createWorkerResponse.status).toBe(200);
+
+    store.tasks.upsert({
+      id: "task_no_agent_start",
+      projectId: "project_1",
+      title: "Cannot start without worker runtime",
+      description: null,
+      status: "pending",
+      loopId: null,
+      repo: "acme/looper",
+      prNumber: null,
+      metadataJson: JSON.stringify({ specPath: "specs/task-no-agent.md" }),
+      createdAt: "2026-04-11T12:00:00.000Z",
+      updatedAt: "2026-04-11T12:00:00.000Z",
+    });
+    store.taskItems.upsert({
+      id: "task_item_no_agent_start",
+      taskId: "task_no_agent_start",
+      content: "Refuse unsupported task start",
+      status: "pending",
+      position: 1,
+      source: "user",
+      metadataJson: null,
+      createdAt: "2026-04-11T12:00:00.000Z",
+      updatedAt: "2026-04-11T12:00:00.000Z",
+    });
+
+    const startTaskResponse = await apiWithoutAgent.handle(
+      new Request("http://localhost/api/v1/tasks/task_no_agent_start/start", {
+        method: "POST",
+      }),
+    );
+    const startTaskBody = (await startTaskResponse.json()) as {
+      error: { code: string; message: string };
+    };
+    expect(startTaskResponse.status).toBe(400);
+    expect(startTaskBody.error.code).toBe("AGENT_NOT_CONFIGURED");
+    expect(startTaskBody.error.message).toContain("config.agent.vendor");
+    expect(store.tasks.getById("task_no_agent_start")?.status).toBe("pending");
+    expect(
+      store.loops
+        .list()
+        .some((loop) => loop.targetId === "task:task_no_agent_start"),
+    ).toBe(false);
+    expect(store.queue.findActiveByDedupe("worker:task_no_agent_start")).toBeNull();
 
     store.close();
     await rm(rootDir, { recursive: true, force: true });

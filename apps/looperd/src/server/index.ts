@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "../bootstrap/logger";
 import type { LooperConfig } from "../config/index";
 import {
+  LOOP_TARGET_TYPES,
   LOOP_STATUSES,
   LOOP_TYPES,
   assertTaskStatusTransition,
@@ -780,8 +781,10 @@ async function buildLoopsCreateResponse(
   }
 
   const type = readLoopType(body);
-  const targetType = readRequiredString(body, "targetType");
+  const targetType = readLoopTargetType(body);
   const status = readLoopStatus(body);
+
+  assertLoopTargetTypeMatchesLoopType(type, targetType);
 
   if (
     (type === "reviewer" || type === "fixer") &&
@@ -890,6 +893,14 @@ function validateTaskStartPrerequisites(
     ? Exclude<T, null>
     : never,
 ) {
+  if (!isCodingAgentConfigured(context.config)) {
+    throw new ApiError(
+      "AGENT_NOT_CONFIGURED",
+      400,
+      "Cannot start task without config.agent.vendor",
+    );
+  }
+
   if (!task.repo) {
     throw new ApiError(
       "VALIDATION_FAILED",
@@ -1021,6 +1032,44 @@ function readLoopType(body: Record<string, unknown>) {
   }
 
   return type;
+}
+
+function readLoopTargetType(body: Record<string, unknown>) {
+  const targetType = readRequiredString(body, "targetType");
+  if (
+    !LOOP_TARGET_TYPES.includes(
+      targetType as (typeof LOOP_TARGET_TYPES)[number],
+    )
+  ) {
+    throw new ApiError(
+      "VALIDATION_FAILED",
+      400,
+      `targetType must be one of: ${LOOP_TARGET_TYPES.join(", ")}`,
+    );
+  }
+
+  return targetType;
+}
+
+function assertLoopTargetTypeMatchesLoopType(type: string, targetType: string) {
+  if (type === "worker" && targetType !== "task") {
+    throw new ApiError(
+      "VALIDATION_FAILED",
+      400,
+      "worker loops must target a task",
+    );
+  }
+
+  if (
+    (type === "reviewer" || type === "fixer") &&
+    targetType !== "pull_request"
+  ) {
+    throw new ApiError(
+      "VALIDATION_FAILED",
+      400,
+      `${type} loops must target a pull request`,
+    );
+  }
 }
 
 function readLoopStatus(body: Record<string, unknown>) {
