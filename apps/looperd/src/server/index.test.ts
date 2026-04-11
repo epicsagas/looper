@@ -1,0 +1,667 @@
+import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { createLogger } from "../bootstrap/logger";
+import { createDefaultLooperConfig } from "../config/index";
+import { SqliteStore } from "../storage/sqlite/sqlite-store";
+import { createLooperdApi } from "./index";
+
+async function createFixture() {
+  const rootDir = await mkdtemp(join(tmpdir(), "looperd-api-"));
+  const config = createDefaultLooperConfig(rootDir);
+  config.storage.dbPath = `${rootDir}/state/looper.sqlite`;
+  config.storage.backupDir = `${rootDir}/backups`;
+  config.daemon.logDir = `${rootDir}/logs`;
+  config.daemon.workingDirectory = rootDir;
+  config.server.authMode = "none";
+  config.agent.vendor = "opencode";
+
+  const logger = await createLogger(config.logging, config.daemon.logDir);
+  const store = new SqliteStore({
+    dbPath: config.storage.dbPath,
+    backupDir: config.storage.backupDir,
+  });
+  store.initialize({ autoMigrate: true });
+
+  const now = "2026-04-11T12:00:00.000Z";
+  store.projects.upsert({
+    id: "project_1",
+    name: "Looper",
+    repoPath: "/tmp/looper",
+    baseBranch: "main",
+    archived: false,
+    metadataJson: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  store.loops.upsert({
+    id: "loop_1",
+    projectId: "project_1",
+    type: "reviewer",
+    targetType: "pull_request",
+    targetId: "pr:acme/looper:42",
+    repo: "acme/looper",
+    prNumber: 42,
+    status: "running",
+    configJson: null,
+    metadataJson: null,
+    lastRunAt: now,
+    nextRunAt: now,
+    createdAt: now,
+    updatedAt: now,
+  });
+  store.runs.upsert({
+    id: "run_1",
+    loopId: "loop_1",
+    status: "running",
+    currentStep: "review",
+    lastCompletedStep: "snapshot",
+    checkpointJson: null,
+    summary: null,
+    errorMessage: null,
+    startedAt: now,
+    lastHeartbeatAt: now,
+    endedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  store.tasks.upsert({
+    id: "task_1",
+    projectId: "project_1",
+    title: "Wire runtime",
+    description: null,
+    status: "in_progress",
+    loopId: null,
+    repo: "acme/looper",
+    prNumber: 42,
+    metadataJson: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  store.queue.upsert({
+    id: "queue_1",
+    projectId: "project_1",
+    loopId: "loop_1",
+    taskId: "task_1",
+    type: "worker",
+    targetType: "task",
+    targetId: "task_1",
+    repo: "acme/looper",
+    prNumber: 42,
+    dedupeKey: "worker:task_1",
+    priority: 3,
+    status: "queued",
+    availableAt: now,
+    attempts: 0,
+    maxAttempts: 3,
+    claimedBy: null,
+    claimedAt: null,
+    startedAt: null,
+    finishedAt: null,
+    lockKey: "task:task_1",
+    payloadJson: null,
+    lastError: null,
+    lastErrorKind: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  store.taskItems.upsert({
+    id: "task_item_1",
+    taskId: "task_1",
+    content: "Ship API routes",
+    status: "in_progress",
+    position: 1,
+    source: "user",
+    metadataJson: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  store.pullRequestSnapshots.upsert({
+    id: "snapshot_1",
+    projectId: "project_1",
+    repo: "acme/looper",
+    prNumber: 42,
+    headSha: "abc123",
+    baseSha: "base123",
+    title: "Runtime foundation",
+    body: "Adds recovery and API",
+    author: "octocat",
+    diffRef: null,
+    checksSummary: "green",
+    unresolvedThreadCount: 1,
+    reviewState: "changes_requested",
+    payloadJson: JSON.stringify({ title: "Runtime foundation" }),
+    capturedAt: now,
+    createdAt: now,
+  });
+  store.events.append({
+    id: "event_1",
+    eventType: "loop.created",
+    projectId: "project_1",
+    loopId: "loop_1",
+    runId: null,
+    entityType: "loop",
+    entityId: "loop_1",
+    correlationId: null,
+    causationId: null,
+    actorType: "system",
+    actorId: "looperd",
+    actorDisplayName: "looperd",
+    payloadJson: JSON.stringify({ status: "running" }),
+    createdAt: now,
+  });
+
+  const api = createLooperdApi({
+    config,
+    logger,
+    store,
+    getStartedAt: () => new Date(now),
+    getRecoverySummary: () => ({ expiredLocksReleased: 1 }),
+  });
+
+  return { api, store, rootDir };
+}
+
+describe("createLooperdApi", () => {
+  test("returns status and config envelopes", async () => {
+    const { api, store, rootDir } = await createFixture();
+
+    const statusResponse = await api.handle(
+      new Request("http://localhost/api/v1/status"),
+    );
+    const statusBody = (await statusResponse.json()) as {
+      ok: boolean;
+      data: {
+        storage: { schemaVersion: string };
+        scheduler: { queuedItems: number; totalRuns: number };
+        safety: {
+          allowAutoCommit: boolean;
+          allowAutoPush: boolean;
+          allowAutoApprove: boolean;
+          allowRiskyFixes: boolean;
+        };
+        notifications: { inAppEnabled: boolean };
+      };
+    };
+
+    expect(statusResponse.status).toBe(200);
+    expect(statusBody.ok).toBe(true);
+    expect(statusBody.data.storage.schemaVersion).toBe("0003_scheduler_queue");
+    expect(statusBody.data.scheduler.queuedItems).toBe(1);
+    expect(statusBody.data.scheduler.totalRuns).toBe(1);
+    expect(statusBody.data.safety.allowAutoCommit).toBe(true);
+    expect(statusBody.data.safety.allowAutoPush).toBe(true);
+    expect(statusBody.data.safety.allowAutoApprove).toBe(false);
+    expect(statusBody.data.safety.allowRiskyFixes).toBe(false);
+    expect(statusBody.data.notifications.inAppEnabled).toBe(true);
+
+    const configResponse = await api.handle(
+      new Request("http://localhost/api/v1/config"),
+    );
+    const configBody = (await configResponse.json()) as {
+      data: { server: { localTokenConfigured: boolean } };
+    };
+    expect(configBody.data.server.localTokenConfigured).toBe(false);
+
+    store.close();
+    await rm(rootDir, { recursive: true, force: true });
+  });
+
+  test("returns events and pull request detail routes", async () => {
+    const { api, store, rootDir } = await createFixture();
+
+    store.loops.upsert({
+      id: "loop_2",
+      projectId: "project_1",
+      type: "fixer",
+      targetType: "pull_request",
+      targetId: "pr:acme/looper:42",
+      repo: "acme/looper",
+      prNumber: 42,
+      status: "paused",
+      configJson: null,
+      metadataJson: null,
+      lastRunAt: null,
+      nextRunAt: null,
+      createdAt: "2026-04-11T12:01:00.000Z",
+      updatedAt: "2026-04-11T12:01:00.000Z",
+    });
+
+    const eventsResponse = await api.handle(
+      new Request("http://localhost/api/v1/events/loop/loop_1"),
+    );
+    const eventsBody = (await eventsResponse.json()) as {
+      data: { items: Array<{ eventType: string }> };
+    };
+    expect(eventsBody.data.items).toHaveLength(1);
+    expect(eventsBody.data.items[0]?.eventType).toBe("loop.created");
+
+    const prResponse = await api.handle(
+      new Request("http://localhost/api/v1/pull-requests/acme%2Flooper/42"),
+    );
+    const prBody = (await prResponse.json()) as {
+      data: { repo: string; prNumber: number; task: { id: string } | null };
+    };
+    expect(prBody.data.repo).toBe("acme/looper");
+    expect(prBody.data.prNumber).toBe(42);
+    expect((prBody.data as { reviewer?: string }).reviewer).toBe("running");
+    expect((prBody.data as { fixer?: string }).fixer).toBe("paused");
+    expect(prBody.data.task?.id).toBe("task_1");
+
+    const prListResponse = await api.handle(
+      new Request("http://localhost/api/v1/pull-requests"),
+    );
+    const prListBody = (await prListResponse.json()) as {
+      data: {
+        items: Array<{
+          repo: string;
+          prNumber: number;
+          reviewState: string | null;
+          checksSummary: string | null;
+          reviewer: string | null;
+          fixer: string | null;
+        }>;
+      };
+    };
+    const listItem = prListBody.data.items.find(
+      (item) => item.repo === "acme/looper" && item.prNumber === 42,
+    );
+    expect(listItem?.reviewState).toBe("changes_requested");
+    expect(listItem?.checksSummary).toBe("green");
+    expect(listItem?.reviewer).toBe("running");
+    expect(listItem?.fixer).toBe("paused");
+
+    const prStatusResponse = await api.handle(
+      new Request(
+        "http://localhost/api/v1/pull-requests/acme%2Flooper/42/status",
+      ),
+    );
+    const prStatusBody = (await prStatusResponse.json()) as {
+      data: {
+        loopStatus: { latestRunStatus: string };
+        reviewer: string | null;
+        fixer: string | null;
+      };
+    };
+    expect(prStatusBody.data.loopStatus.latestRunStatus).toBe("running");
+    expect(prStatusBody.data.reviewer).toBe("running");
+    expect(prStatusBody.data.fixer).toBe("paused");
+
+    store.close();
+    await rm(rootDir, { recursive: true, force: true });
+  });
+
+  test("lists PR identities from loops when snapshot is missing", async () => {
+    const { api, store, rootDir } = await createFixture();
+
+    store.loops.upsert({
+      id: "loop_no_snapshot",
+      projectId: "project_1",
+      type: "reviewer",
+      targetType: "pull_request",
+      targetId: "pr:acme/looper:77",
+      repo: "acme/looper",
+      prNumber: 77,
+      status: "queued",
+      configJson: null,
+      metadataJson: null,
+      lastRunAt: null,
+      nextRunAt: null,
+      createdAt: "2026-04-11T12:02:00.000Z",
+      updatedAt: "2026-04-11T12:02:00.000Z",
+    });
+
+    const prListResponse = await api.handle(
+      new Request("http://localhost/api/v1/pull-requests"),
+    );
+    const prListBody = (await prListResponse.json()) as {
+      data: {
+        items: Array<{
+          repo: string;
+          prNumber: number;
+          reviewState: string | null;
+          checksSummary: string | null;
+          reviewer: string | null;
+          fixer: string | null;
+        }>;
+      };
+    };
+
+    const missingSnapshotItem = prListBody.data.items.find(
+      (item) => item.repo === "acme/looper" && item.prNumber === 77,
+    );
+    expect(missingSnapshotItem).toBeDefined();
+    expect(missingSnapshotItem?.reviewState).toBeNull();
+    expect(missingSnapshotItem?.checksSummary).toBeNull();
+    expect(missingSnapshotItem?.reviewer).toBe("queued");
+    expect(missingSnapshotItem?.fixer).toBeNull();
+
+    store.close();
+    await rm(rootDir, { recursive: true, force: true });
+  });
+
+  test("returns loop, task, and run read routes", async () => {
+    const { api, store, rootDir } = await createFixture();
+
+    const loopsResponse = await api.handle(
+      new Request("http://localhost/api/v1/loops"),
+    );
+    const loopsBody = (await loopsResponse.json()) as {
+      data: { items: Array<{ id: string }> };
+    };
+    expect(loopsResponse.status).toBe(200);
+    expect(loopsBody.data.items[0]?.id).toBe("loop_1");
+
+    const loopResponse = await api.handle(
+      new Request("http://localhost/api/v1/loops/loop_1"),
+    );
+    const loopBody = (await loopResponse.json()) as {
+      data: { id: string; status: string };
+    };
+    expect(loopBody.data.id).toBe("loop_1");
+    expect(loopBody.data.status).toBe("running");
+
+    const tasksResponse = await api.handle(
+      new Request("http://localhost/api/v1/tasks"),
+    );
+    const tasksBody = (await tasksResponse.json()) as {
+      data: { items: Array<{ id: string }> };
+    };
+    expect(tasksResponse.status).toBe(200);
+    expect(tasksBody.data.items[0]?.id).toBe("task_1");
+
+    const taskResponse = await api.handle(
+      new Request("http://localhost/api/v1/tasks/task_1"),
+    );
+    const taskBody = (await taskResponse.json()) as {
+      data: { id: string; items: Array<{ id: string }> };
+    };
+    expect(taskBody.data.id).toBe("task_1");
+    expect(taskBody.data.items[0]?.id).toBe("task_item_1");
+
+    const runsResponse = await api.handle(
+      new Request("http://localhost/api/v1/runs"),
+    );
+    const runsBody = (await runsResponse.json()) as {
+      data: { items: Array<{ id: string }> };
+    };
+    expect(runsResponse.status).toBe(200);
+    expect(runsBody.data.items[0]?.id).toBe("run_1");
+
+    const filteredRunsResponse = await api.handle(
+      new Request("http://localhost/api/v1/runs?loopId=loop_1"),
+    );
+    const filteredRunsBody = (await filteredRunsResponse.json()) as {
+      data: { items: Array<{ loopId: string }> };
+    };
+    expect(filteredRunsBody.data.items).toHaveLength(1);
+    expect(filteredRunsBody.data.items[0]?.loopId).toBe("loop_1");
+
+    store.close();
+    await rm(rootDir, { recursive: true, force: true });
+  });
+
+  test("supports loop and task mutation routes", async () => {
+    const { api, store, rootDir } = await createFixture();
+
+    const pauseLoopResponse = await api.handle(
+      new Request("http://localhost/api/v1/loops/loop_1/pause", {
+        method: "POST",
+      }),
+    );
+    const pauseLoopBody = (await pauseLoopResponse.json()) as {
+      data: { status: string };
+    };
+    expect(pauseLoopResponse.status).toBe(200);
+    expect(pauseLoopBody.data.status).toBe("paused");
+
+    const startLoopResponse = await api.handle(
+      new Request("http://localhost/api/v1/loops/loop_1/start", {
+        method: "POST",
+      }),
+    );
+    const startLoopBody = (await startLoopResponse.json()) as {
+      data: { status: string };
+    };
+    expect(startLoopBody.data.status).toBe("running");
+
+    const createTaskResponse = await api.handle(
+      new Request("http://localhost/api/v1/tasks", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: "project_1",
+          title: "Implement CLI route",
+          description: "Create API endpoint",
+          specPath: "specs/cli.md",
+          items: ["wire client", "add tests"],
+        }),
+      }),
+    );
+    const createTaskBody = (await createTaskResponse.json()) as {
+      data: {
+        id: string;
+        status: string;
+        title: string;
+        specPath: string;
+        items: Array<{ id: string }>;
+      };
+    };
+    expect(createTaskResponse.status).toBe(200);
+    expect(createTaskBody.data.status).toBe("pending");
+    expect(createTaskBody.data.title).toBe("Implement CLI route");
+    expect(createTaskBody.data.specPath).toBe("specs/cli.md");
+    expect(createTaskBody.data.items).toHaveLength(2);
+
+    const startedTaskResponse = await api.handle(
+      new Request(
+        `http://localhost/api/v1/tasks/${createTaskBody.data.id}/start`,
+        {
+          method: "POST",
+        },
+      ),
+    );
+    const startedTaskBody = (await startedTaskResponse.json()) as {
+      data: { status: string; loopId: string | null };
+    };
+    expect(startedTaskBody.data.status).toBe("in_progress");
+    expect(startedTaskBody.data.loopId).toBeTruthy();
+    expect(
+      store.queue.findActiveByDedupe(`worker:${createTaskBody.data.id}`),
+    ).toMatchObject({
+      loopId: startedTaskBody.data.loopId,
+      taskId: createTaskBody.data.id,
+      type: "worker",
+      status: "queued",
+    });
+
+    const pausedTaskResponse = await api.handle(
+      new Request(
+        `http://localhost/api/v1/tasks/${createTaskBody.data.id}/pause`,
+        {
+          method: "POST",
+        },
+      ),
+    );
+    const pausedTaskBody = (await pausedTaskResponse.json()) as {
+      data: { status: string };
+    };
+    expect(pausedTaskBody.data.status).toBe("paused");
+
+    const validationResponse = await api.handle(
+      new Request("http://localhost/api/v1/tasks", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: "project_1", title: "" }),
+      }),
+    );
+    expect(validationResponse.status).toBe(400);
+
+    const createLoopResponse = await api.handle(
+      new Request("http://localhost/api/v1/loops", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: "project_1",
+          type: "fixer",
+          targetType: "pull_request",
+          repo: "acme/looper",
+          prNumber: 43,
+        }),
+      }),
+    );
+    const createLoopBody = (await createLoopResponse.json()) as {
+      data: { type: string; repo: string; prNumber: number; status: string };
+    };
+    expect(createLoopResponse.status).toBe(200);
+    expect(createLoopBody.data.type).toBe("fixer");
+    expect(createLoopBody.data.repo).toBe("acme/looper");
+    expect(createLoopBody.data.prNumber).toBe(43);
+    expect(createLoopBody.data.status).toBe("running");
+
+    store.close();
+    await rm(rootDir, { recursive: true, force: true });
+  });
+
+  test("supports project add route", async () => {
+    const { api, store, rootDir } = await createFixture();
+    const apiWithProjects = createLooperdApi({
+      config: createDefaultLooperConfig(rootDir),
+      logger: await createLogger(
+        createDefaultLooperConfig(rootDir).logging,
+        `${rootDir}/logs-projects`,
+      ),
+      store,
+      projects: {
+        addProject: async (input: {
+          id: string;
+          name: string;
+          repoPath: string;
+          baseBranch: string;
+        }) => ({
+          project: {
+            id: input.id,
+            name: input.name,
+            repoPath: input.repoPath,
+            baseBranch: input.baseBranch,
+            archived: false,
+            metadataJson: JSON.stringify({ repo: "powerformer/looper" }),
+            createdAt: "2026-04-11T12:00:00.000Z",
+            updatedAt: "2026-04-11T12:00:00.000Z",
+          },
+          repo: "powerformer/looper",
+          discoveredPullRequests: 1,
+          discoveredWorktrees: 2,
+          warnings: [],
+        }),
+      } as never,
+      getStartedAt: () => new Date("2026-04-11T12:00:00.000Z"),
+      getRecoverySummary: () => ({ expiredLocksReleased: 1 }),
+    });
+
+    const response = await apiWithProjects.handle(
+      new Request("http://localhost/api/v1/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          repoPath: "/tmp/repos/looper",
+          id: "looper",
+          name: "Looper",
+        }),
+      }),
+    );
+    const body = (await response.json()) as {
+      data: { id: string; repo: string; discoveredPullRequests: number };
+    };
+
+    expect(response.status).toBe(200);
+    expect(body.data.id).toBe("looper");
+    expect(body.data.repo).toBe("powerformer/looper");
+    expect(body.data.discoveredPullRequests).toBe(1);
+
+    store.close();
+    await rm(rootDir, { recursive: true, force: true });
+  });
+
+  test("rejects reviewer/fixer create and start when no coding agent is configured", async () => {
+    const { api, store, rootDir } = await createFixture();
+    store.loops.upsert({
+      id: "loop_fixer_no_agent",
+      projectId: "project_1",
+      type: "fixer",
+      targetType: "pull_request",
+      targetId: "pr:acme/looper:99",
+      repo: "acme/looper",
+      prNumber: 99,
+      status: "paused",
+      configJson: null,
+      metadataJson: null,
+      lastRunAt: null,
+      nextRunAt: null,
+      createdAt: "2026-04-11T12:00:00.000Z",
+      updatedAt: "2026-04-11T12:00:00.000Z",
+    });
+
+    const configWithoutAgent = createDefaultLooperConfig(rootDir);
+    configWithoutAgent.agent.vendor = undefined;
+    const apiWithoutAgent = createLooperdApi({
+      config: configWithoutAgent,
+      logger: await createLogger(
+        configWithoutAgent.logging,
+        `${rootDir}/logs-no-agent`,
+      ),
+      store,
+      getStartedAt: () => new Date("2026-04-11T12:00:00.000Z"),
+      getRecoverySummary: () => ({ expiredLocksReleased: 0 }),
+    });
+
+    const createFixerResponse = await apiWithoutAgent.handle(
+      new Request("http://localhost/api/v1/loops", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: "project_1",
+          type: "fixer",
+          targetType: "pull_request",
+          repo: "acme/looper",
+          prNumber: 88,
+        }),
+      }),
+    );
+    const createFixerBody = (await createFixerResponse.json()) as {
+      error: { code: string; message: string };
+    };
+    expect(createFixerResponse.status).toBe(400);
+    expect(createFixerBody.error.code).toBe("AGENT_NOT_CONFIGURED");
+
+    const startFixerResponse = await apiWithoutAgent.handle(
+      new Request("http://localhost/api/v1/loops/loop_fixer_no_agent/start", {
+        method: "POST",
+      }),
+    );
+    const startFixerBody = (await startFixerResponse.json()) as {
+      error: { code: string; message: string };
+    };
+    expect(startFixerResponse.status).toBe(400);
+    expect(startFixerBody.error.code).toBe("AGENT_NOT_CONFIGURED");
+
+    const createWorkerResponse = await apiWithoutAgent.handle(
+      new Request("http://localhost/api/v1/loops", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: "project_1",
+          type: "worker",
+          targetType: "task",
+          taskId: "task_1",
+        }),
+      }),
+    );
+    expect(createWorkerResponse.status).toBe(200);
+
+    store.close();
+    await rm(rootDir, { recursive: true, force: true });
+  });
+});

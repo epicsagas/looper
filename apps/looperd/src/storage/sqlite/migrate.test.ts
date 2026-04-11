@@ -1,0 +1,112 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { Database } from "bun:sqlite";
+
+import { createMigrationRunner } from "./migrate";
+
+const cleanupPaths: string[] = [];
+
+afterEach(async () => {
+  while (cleanupPaths.length > 0) {
+    const path = cleanupPaths.pop();
+    if (path) {
+      await rm(path, { recursive: true, force: true });
+    }
+  }
+});
+
+async function createFixture(prefix: string) {
+  const rootDir = await mkdtemp(join(tmpdir(), prefix));
+  const dbPath = join(rootDir, "looper.sqlite");
+  const migrationsDir = join(rootDir, "migrations");
+  const backupDir = join(rootDir, "backups");
+
+  await mkdir(migrationsDir, { recursive: true });
+
+  cleanupPaths.push(rootDir);
+
+  return { rootDir, dbPath, migrationsDir, backupDir };
+}
+
+describe("createMigrationRunner", () => {
+  test("lists and runs pending migrations with a backup", async () => {
+    const fixture = await createFixture("looper-migrate-");
+
+    await Bun.write(
+      join(fixture.migrationsDir, "0001_init.sql"),
+      [
+        "CREATE TABLE widgets (id TEXT PRIMARY KEY, name TEXT NOT NULL);",
+        "CREATE INDEX idx_widgets_name ON widgets (name);",
+      ].join("\n"),
+    );
+    await Bun.write(
+      join(fixture.migrationsDir, "0002_seed.sql"),
+      "INSERT INTO widgets (id, name) VALUES ('w_1', 'alpha');",
+    );
+
+    const db = new Database(fixture.dbPath, { create: true });
+    const runner = createMigrationRunner(db, {
+      migrationsDir: fixture.migrationsDir,
+      backupDir: fixture.backupDir,
+      now: () => new Date("2026-04-11T10:20:30.000Z"),
+    });
+
+    expect(runner.listPending()).toEqual(["0001_init", "0002_seed"]);
+
+    const result = runner.runPending({ requireBackup: true });
+
+    expect(result.appliedIds).toEqual(["0001_init", "0002_seed"]);
+    expect(result.skippedIds).toEqual([]);
+    expect(result.backupPath).toBe(
+      join(fixture.backupDir, "looper-2026-04-11T10-20-30.000Z.sqlite"),
+    );
+
+    if (!result.backupPath) {
+      throw new Error("Expected backup path to be returned");
+    }
+
+    const backupBytes = await readFile(result.backupPath);
+    expect(backupBytes.byteLength).toBeGreaterThan(0);
+    expect(runner.listPending()).toEqual([]);
+    expect(
+      db.query("SELECT name FROM widgets WHERE id = ?1").get("w_1") as {
+        name: string;
+      },
+    ).toEqual({ name: "alpha" });
+
+    db.close(false);
+  });
+
+  test("stops on migration failure without recording the failed migration", async () => {
+    const fixture = await createFixture("looper-migrate-fail-");
+
+    await Bun.write(
+      join(fixture.migrationsDir, "0001_init.sql"),
+      "CREATE TABLE widgets (id TEXT PRIMARY KEY);",
+    );
+    await Bun.write(
+      join(fixture.migrationsDir, "0002_broken.sql"),
+      "INSERT INTO missing_table (id) VALUES ('w_1');",
+    );
+
+    const db = new Database(fixture.dbPath, { create: true });
+    const runner = createMigrationRunner(db, {
+      migrationsDir: fixture.migrationsDir,
+      now: () => new Date("2026-04-11T10:20:30.000Z"),
+    });
+
+    expect(() => runner.runPending()).toThrow(
+      "Migration failed (0002_broken.sql)",
+    );
+
+    expect(runner.status().applied.map((migration) => migration.id)).toEqual([
+      "0001_init",
+    ]);
+    expect(runner.listPending()).toEqual(["0002_broken"]);
+
+    db.close(false);
+  });
+});

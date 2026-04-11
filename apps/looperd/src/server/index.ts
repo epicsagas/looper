@@ -1,0 +1,1365 @@
+import { randomUUID } from "node:crypto";
+
+import type { Logger } from "../bootstrap/logger";
+import type { LooperConfig } from "../config/index";
+import {
+  assertTaskStatusTransition,
+  assertUniqueActiveLoop,
+  createLoop,
+  createTaskItem,
+  definePullRequestLoopTarget,
+  defineTaskLoopTarget,
+} from "../domain/index";
+import type { ProjectManager } from "../projects/index";
+import { SchedulerQueue } from "../scheduler/index";
+import type { Store } from "../storage/store";
+import type {
+  EventLogRecord,
+  PullRequestSnapshotRecord,
+  RunRecord,
+} from "../storage/types";
+
+export interface ApiResponse<T> {
+  ok: boolean;
+  data?: T;
+  error?: {
+    code: string;
+    message: string;
+    details?: unknown;
+  };
+  requestId: string;
+}
+
+export interface LooperdApiContext {
+  config: LooperConfig;
+  logger: Logger;
+  store: Store;
+  projects?: ProjectManager;
+  getStartedAt(): Date | undefined;
+  getRecoverySummary(): Record<string, unknown>;
+}
+
+export interface LooperdApi {
+  handle(request: Request): Promise<Response>;
+}
+
+export interface LooperdApiServer {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  getPort(): number | undefined;
+}
+
+class ApiError extends Error {
+  constructor(
+    public readonly code: string,
+    public readonly status: number,
+    message: string,
+    public readonly details?: unknown,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+export function createLooperdApi(context: LooperdApiContext): LooperdApi {
+  return {
+    async handle(request: Request): Promise<Response> {
+      const requestId =
+        request.headers.get("x-request-id")?.trim() || randomUUID();
+
+      try {
+        authorizeRequest(request, context.config);
+
+        const url = new URL(request.url);
+        const pathname = normalizePathname(url.pathname);
+
+        if (!pathname.startsWith("/api/v1")) {
+          throw new ApiError(
+            "ROUTE_NOT_FOUND",
+            404,
+            `Unknown route: ${pathname}`,
+          );
+        }
+
+        let data: unknown;
+
+        switch (true) {
+          case pathname === "/api/v1/healthz":
+            assertMethod(request, ["GET"], pathname);
+            data = buildHealthResponse(context);
+            break;
+          case pathname === "/api/v1/status":
+            assertMethod(request, ["GET"], pathname);
+            data = buildStatusResponse(context);
+            break;
+          case pathname === "/api/v1/config":
+            assertMethod(request, ["GET"], pathname);
+            data = buildConfigResponse(context.config);
+            break;
+          case pathname === "/api/v1/events":
+            assertMethod(request, ["GET"], pathname);
+            data = buildEventsResponse(context, url.searchParams);
+            break;
+          case pathname.startsWith("/api/v1/events/"):
+            assertMethod(request, ["GET"], pathname);
+            data = buildEntityEventsResponse(context, pathname);
+            break;
+          case pathname === "/api/v1/pull-requests":
+            assertMethod(request, ["GET"], pathname);
+            data = buildPullRequestsResponse(context);
+            break;
+          case pathname.startsWith("/api/v1/pull-requests/"):
+            assertMethod(request, ["GET"], pathname);
+            data = buildPullRequestRouteResponse(context, pathname);
+            break;
+          case pathname === "/api/v1/loops":
+            data =
+              request.method === "GET"
+                ? buildLoopsResponse(context)
+                : await buildLoopsCreateResponse(context, request);
+            break;
+          case pathname === "/api/v1/projects":
+            data = await buildProjectsRouteResponse(context, request);
+            break;
+          case pathname.startsWith("/api/v1/loops/"):
+            data = await buildLoopRouteResponse(context, request, pathname);
+            break;
+          case pathname === "/api/v1/tasks":
+            data = await buildTasksRouteResponse(context, request);
+            break;
+          case pathname.startsWith("/api/v1/tasks/"):
+            data = await buildTaskRouteResponse(context, request, pathname);
+            break;
+          case pathname === "/api/v1/runs":
+            assertMethod(request, ["GET"], pathname);
+            data = buildRunsResponse(context, url.searchParams);
+            break;
+          default:
+            throw new ApiError(
+              "ROUTE_NOT_FOUND",
+              404,
+              `Unknown route: ${pathname}`,
+            );
+        }
+
+        return jsonResponse(200, { ok: true, data, requestId });
+      } catch (error) {
+        const apiError = toApiError(error);
+        context.logger.warn("looperd api request failed", {
+          requestId,
+          method: request.method,
+          url: request.url,
+          code: apiError.code,
+          status: apiError.status,
+          message: apiError.message,
+        });
+
+        return jsonResponse(apiError.status, {
+          ok: false,
+          error: {
+            code: apiError.code,
+            message: apiError.message,
+            details: apiError.details,
+          },
+          requestId,
+        });
+      }
+    },
+  };
+}
+
+function assertMethod(
+  request: Request,
+  methods: readonly string[],
+  pathname: string,
+): void {
+  if (methods.includes(request.method)) {
+    return;
+  }
+
+  throw new ApiError(
+    "METHOD_NOT_ALLOWED",
+    405,
+    `Unsupported method for ${pathname}`,
+  );
+}
+
+export function createLooperdApiServer(
+  context: LooperdApiContext,
+): LooperdApiServer {
+  const api = createLooperdApi(context);
+  let server: Bun.Server<unknown> | undefined;
+
+  return {
+    async start(): Promise<void> {
+      if (server) {
+        return;
+      }
+
+      server = Bun.serve({
+        hostname: context.config.server.host,
+        port: context.config.server.port,
+        fetch: (request) => api.handle(request),
+        idleTimeout: 30,
+      });
+
+      context.logger.info("looperd http server listening", {
+        host: server.hostname,
+        port: server.port,
+      });
+    },
+    async stop(): Promise<void> {
+      if (!server) {
+        return;
+      }
+
+      server.stop(true);
+      server = undefined;
+    },
+    getPort(): number | undefined {
+      return server?.port;
+    },
+  };
+}
+
+function authorizeRequest(request: Request, config: LooperConfig): void {
+  if (config.server.authMode !== "local-token") {
+    return;
+  }
+
+  const authorization = request.headers.get("authorization");
+  const expectedToken = config.server.localToken;
+
+  if (!expectedToken) {
+    throw new ApiError(
+      "AUTH_MISCONFIGURED",
+      500,
+      "Local token auth is enabled but no token is configured",
+    );
+  }
+
+  if (authorization !== `Bearer ${expectedToken}`) {
+    throw new ApiError("UNAUTHORIZED", 401, "Authorization token is required");
+  }
+}
+
+function normalizePathname(pathname: string): string {
+  return pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
+}
+
+function buildHealthResponse(context: LooperdApiContext) {
+  const storage = context.store.schema.healthcheck();
+
+  return {
+    healthy: storage.ok,
+    startedAt: context.getStartedAt()?.toISOString(),
+    storage,
+  };
+}
+
+function buildStatusResponse(context: LooperdApiContext) {
+  const loops = context.store.loops.list();
+  const runs = context.store.runs.list();
+  const queueItems = context.store.queue.list();
+  const storage = context.store.schema.healthcheck();
+
+  return {
+    service: {
+      healthy: storage.ok,
+      version: "0.1.0",
+      daemonMode: context.config.daemon.mode,
+      startedAt: context.getStartedAt()?.toISOString(),
+      recovery: context.getRecoverySummary(),
+    },
+    storage: {
+      mode: storage.mode,
+      dbPath: storage.dbPath,
+      schemaVersion: storage.migration.latestAppliedId ?? "uninitialized",
+      pendingMigrations: context.store.schema
+        .getMigrationStatus()
+        .pending.map((migration) => migration.id),
+      healthy: storage.ok,
+    },
+    scheduler: {
+      healthy: true,
+      queuedItems: queueItems.filter((item) => item.status === "queued").length,
+      runningItems: queueItems.filter((item) => item.status === "running")
+        .length,
+      completedItems: queueItems.filter((item) => item.status === "completed")
+        .length,
+      failedItems: queueItems.filter((item) => item.status === "failed").length,
+      totalRuns: runs.length,
+      activeRuns: runs.filter((run) => run.status === "running").length,
+    },
+    loops: {
+      reviewer: summarizeLoopType(loops, "reviewer"),
+      worker: summarizeLoopType(loops, "worker"),
+      fixer: summarizeLoopType(loops, "fixer"),
+    },
+    safety: {
+      allowAutoCommit: context.config.defaults.allowAutoCommit,
+      allowAutoPush: context.config.defaults.allowAutoPush,
+      allowAutoApprove: context.config.defaults.allowAutoApprove,
+      allowRiskyFixes: context.config.defaults.allowRiskyFixes,
+      openPrStrategy: context.config.defaults.openPrStrategy ?? "manual",
+    },
+    notifications: {
+      inAppEnabled: context.config.notifications.inApp,
+      osascriptEnabled: context.config.notifications.osascript.enabled,
+    },
+    tools: {
+      bun: Boolean(context.config.tools.bunPath),
+      git: Boolean(context.config.tools.gitPath),
+      gh: Boolean(context.config.tools.ghPath),
+      osascript: Boolean(context.config.tools.osascriptPath),
+    },
+  };
+}
+
+function summarizeLoopType(
+  loops: ReturnType<Store["loops"]["list"]>,
+  type: string,
+) {
+  const filtered = loops.filter((loop) => loop.type === type);
+
+  return {
+    running: filtered.filter((loop) => loop.status === "running").length,
+    paused: filtered.filter((loop) => loop.status === "paused").length,
+    failed: filtered.filter((loop) => loop.status === "failed").length,
+  };
+}
+
+function buildConfigResponse(config: LooperConfig) {
+  return {
+    server: {
+      host: config.server.host,
+      port: config.server.port,
+      baseUrl: config.server.baseUrl,
+      authMode: config.server.authMode,
+      localTokenConfigured: Boolean(config.server.localToken),
+    },
+    storage: config.storage,
+    scheduler: config.scheduler,
+    agent: config.agent,
+    logging: config.logging,
+    notifications: config.notifications,
+    tools: config.tools,
+    daemon: config.daemon,
+    package: config.package,
+    defaults: config.defaults,
+    projects: config.projects,
+  };
+}
+
+function buildEventsResponse(
+  context: LooperdApiContext,
+  searchParams: URLSearchParams,
+) {
+  const limitValue = searchParams.get("limit");
+  const limit = limitValue ? Number(limitValue) : 100;
+
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new ApiError(
+      "VALIDATION_FAILED",
+      400,
+      "limit must be a positive integer",
+    );
+  }
+
+  return {
+    items: context.store.events.list(limit).map(serializeEvent),
+  };
+}
+
+function buildEntityEventsResponse(
+  context: LooperdApiContext,
+  pathname: string,
+) {
+  const parts = pathname.split("/").filter(Boolean);
+  const entityType = parts[3];
+  const entityId = parts[4];
+
+  if (!entityType || !entityId) {
+    throw new ApiError(
+      "VALIDATION_FAILED",
+      400,
+      "entityType and entityId are required",
+    );
+  }
+
+  return {
+    entityType,
+    entityId,
+    items: context.store.events
+      .listByEntity(
+        decodeURIComponent(entityType),
+        decodeURIComponent(entityId),
+      )
+      .map(serializeEvent),
+  };
+}
+
+function buildPullRequestsResponse(context: LooperdApiContext) {
+  const latestSnapshots = dedupeLatestSnapshots(
+    context.store.pullRequestSnapshots.list(),
+  );
+  const loops = context.store.loops.list();
+  const tasks = context.store.tasks.list();
+  const identities = collectPullRequestIdentities(
+    latestSnapshots,
+    loops,
+    tasks,
+  );
+  const snapshotByKey = new Map(
+    latestSnapshots.map((snapshot) => [
+      `${snapshot.repo}#${snapshot.prNumber}`,
+      snapshot,
+    ]),
+  );
+
+  return {
+    items: identities.map((identity) =>
+      serializePullRequestListItem(
+        context,
+        identity.repo,
+        identity.prNumber,
+        snapshotByKey.get(`${identity.repo}#${identity.prNumber}`),
+      ),
+    ),
+  };
+}
+
+function buildLoopsResponse(context: LooperdApiContext) {
+  return {
+    items: context.store.loops.list(),
+  };
+}
+
+async function buildLoopRouteResponse(
+  context: LooperdApiContext,
+  request: Request,
+  pathname: string,
+) {
+  const parts = pathname.split("/").filter(Boolean);
+  const loopId = decodeURIComponent(parts[3] ?? "");
+  const subresource = parts[4];
+
+  if (!loopId) {
+    throw new ApiError("VALIDATION_FAILED", 400, "loopId is required");
+  }
+
+  if (!subresource) {
+    assertMethod(request, ["GET"], pathname);
+    const loop = context.store.loops.getById(loopId);
+    if (!loop) {
+      throw new ApiError("LOOP_NOT_FOUND", 404, `Loop not found: ${loopId}`);
+    }
+
+    return loop;
+  }
+
+  if (subresource === "start") {
+    assertMethod(request, ["POST"], pathname);
+    return mutateLoopStatus(context, loopId, "running");
+  }
+
+  if (subresource === "pause") {
+    assertMethod(request, ["POST"], pathname);
+    return mutateLoopStatus(context, loopId, "paused");
+  }
+
+  throw new ApiError("ROUTE_NOT_FOUND", 404, `Unknown route: ${pathname}`);
+}
+
+function mutateLoopStatus(
+  context: LooperdApiContext,
+  loopId: string,
+  status: string,
+) {
+  const loop = context.store.loops.getById(loopId);
+  if (!loop) {
+    throw new ApiError("LOOP_NOT_FOUND", 404, `Loop not found: ${loopId}`);
+  }
+
+  if (
+    status === "running" &&
+    (loop.type === "reviewer" || loop.type === "fixer") &&
+    !isCodingAgentConfigured(context.config)
+  ) {
+    throw new ApiError(
+      "AGENT_NOT_CONFIGURED",
+      400,
+      `Cannot start ${loop.type} loop without config.agent.vendor`,
+    );
+  }
+
+  const now = new Date().toISOString();
+  const updated: typeof loop = {
+    ...loop,
+    status,
+    updatedAt: now,
+    ...(status === "running" ? { nextRunAt: now } : {}),
+  };
+  context.store.loops.upsert(updated);
+
+  return updated;
+}
+
+async function buildTasksRouteResponse(
+  context: LooperdApiContext,
+  request: Request,
+) {
+  if (request.method === "GET") {
+    return {
+      items: context.store.tasks
+        .list()
+        .map((task) => serializeTask(context, task)),
+    };
+  }
+
+  if (request.method === "POST") {
+    const body = await parseJsonBody(request);
+    const projectId = readRequiredString(body, "projectId");
+    const title = readRequiredString(body, "title");
+    const project = context.store.projects.getById(projectId);
+    if (!project) {
+      throw new ApiError(
+        "PROJECT_NOT_FOUND",
+        404,
+        `Project not found: ${projectId}`,
+      );
+    }
+
+    const now = new Date().toISOString();
+    const taskId = randomUUID();
+    const specPath = readOptionalString(body, "specPath");
+    const items = readTaskItems(body, taskId, now);
+
+    const task = {
+      id: taskId,
+      projectId,
+      title,
+      description: readOptionalString(body, "description"),
+      status: "pending",
+      loopId: readOptionalString(body, "loopId"),
+      repo: readOptionalString(body, "repo"),
+      prNumber: readOptionalPositiveInteger(body, "prNumber"),
+      metadataJson: specPath ? JSON.stringify({ specPath }) : null,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    context.store.withTransaction((store) => {
+      store.tasks.upsert(task);
+      for (const item of items) {
+        store.taskItems.upsert(item);
+      }
+    });
+
+    return serializeTask(context, context.store.tasks.getById(task.id) ?? task);
+  }
+
+  throw new ApiError(
+    "METHOD_NOT_ALLOWED",
+    405,
+    "Unsupported method for /api/v1/tasks",
+  );
+}
+
+async function buildTaskRouteResponse(
+  context: LooperdApiContext,
+  request: Request,
+  pathname: string,
+) {
+  const parts = pathname.split("/").filter(Boolean);
+  const taskId = decodeURIComponent(parts[3] ?? "");
+  const subresource = parts[4];
+
+  if (!taskId) {
+    throw new ApiError("VALIDATION_FAILED", 400, "taskId is required");
+  }
+
+  if (!subresource) {
+    assertMethod(request, ["GET"], pathname);
+    const task = context.store.tasks.getById(taskId);
+    if (!task) {
+      throw new ApiError("TASK_NOT_FOUND", 404, `Task not found: ${taskId}`);
+    }
+
+    return serializeTask(context, task);
+  }
+
+  if (subresource === "start") {
+    assertMethod(request, ["POST"], pathname);
+    return startTask(context, taskId);
+  }
+
+  if (subresource === "pause") {
+    assertMethod(request, ["POST"], pathname);
+    return pauseTask(context, taskId);
+  }
+
+  throw new ApiError("ROUTE_NOT_FOUND", 404, `Unknown route: ${pathname}`);
+}
+
+function mutateTaskStatus(
+  context: LooperdApiContext,
+  taskId: string,
+  status: string,
+) {
+  const task = context.store.tasks.getById(taskId);
+  if (!task) {
+    throw new ApiError("TASK_NOT_FOUND", 404, `Task not found: ${taskId}`);
+  }
+
+  try {
+    assertTaskStatusTransition(task.status as never, status as never);
+  } catch (error) {
+    throw new ApiError(
+      "INVALID_TASK_TRANSITION",
+      409,
+      error instanceof Error ? error.message : "Invalid task transition",
+    );
+  }
+
+  const updated = {
+    ...task,
+    status,
+    updatedAt: new Date().toISOString(),
+  };
+  context.store.tasks.upsert(updated);
+
+  return updated;
+}
+
+function startTask(context: LooperdApiContext, taskId: string) {
+  const task = context.store.tasks.getById(taskId);
+  if (!task) {
+    throw new ApiError("TASK_NOT_FOUND", 404, `Task not found: ${taskId}`);
+  }
+
+  const now = new Date().toISOString();
+  let loop = task.loopId ? context.store.loops.getById(task.loopId) : null;
+
+  if (!loop) {
+    loop = createLoopRecord({
+      context,
+      projectId: task.projectId,
+      type: "worker",
+      targetType: "task",
+      taskId,
+      status: "running",
+      now,
+    });
+  } else if (loop.status !== "running") {
+    loop = mutateLoopStatus(context, loop.id, "running");
+  }
+
+  const updatedTask = {
+    ...task,
+    loopId: loop.id,
+    status: "in_progress",
+    updatedAt: now,
+  };
+
+  context.store.tasks.upsert(updatedTask);
+  new SchedulerQueue({
+    store: context.store,
+    retryMaxAttempts: context.config.scheduler.retryMaxAttempts,
+    retryBaseDelayMs: context.config.scheduler.retryBaseDelayMs,
+    now: () => new Date(now),
+  }).enqueue({
+    projectId: updatedTask.projectId,
+    loopId: loop.id,
+    taskId: updatedTask.id,
+    type: "worker",
+    targetType: "task",
+    targetId: `task:${updatedTask.id}`,
+    repo: updatedTask.repo,
+    dedupeKey: `worker:${updatedTask.id}`,
+  });
+  return serializeTask(context, updatedTask);
+}
+
+function pauseTask(context: LooperdApiContext, taskId: string) {
+  const task = mutateTaskStatus(context, taskId, "paused");
+
+  if (task.loopId) {
+    const loop = context.store.loops.getById(task.loopId);
+    if (loop && loop.status !== "paused") {
+      mutateLoopStatus(context, loop.id, "paused");
+    }
+  }
+
+  return serializeTask(context, context.store.tasks.getById(taskId) ?? task);
+}
+
+function buildRunsResponse(
+  context: LooperdApiContext,
+  searchParams: URLSearchParams,
+) {
+  const loopId = searchParams.get("loopId")?.trim();
+
+  return {
+    items: loopId
+      ? context.store.runs.listByLoop(loopId)
+      : context.store.runs.list(),
+  };
+}
+
+async function buildProjectsRouteResponse(
+  context: LooperdApiContext,
+  request: Request,
+) {
+  if (request.method === "GET") {
+    return {
+      items: context.store.projects
+        .list()
+        .map((project) => serializeProject(project)),
+    };
+  }
+
+  assertMethod(request, ["POST"], "/api/v1/projects");
+  if (!context.projects) {
+    throw new ApiError(
+      "PROJECTS_UNAVAILABLE",
+      500,
+      "Project management is not available in this runtime",
+    );
+  }
+
+  const body = await parseJsonBody(request);
+  const repoPath = readRequiredString(body, "repoPath");
+  const id =
+    readOptionalString(body, "id") ?? deriveProjectIdFromPath(repoPath);
+  const name = readOptionalString(body, "name") ?? id;
+  const baseBranch =
+    readOptionalString(body, "baseBranch") ??
+    context.config.defaults.baseBranch;
+
+  const result = await context.projects.addProject({
+    id,
+    name,
+    repoPath,
+    baseBranch,
+    worktreeRoot: readOptionalString(body, "worktreeRoot"),
+    repo: readOptionalString(body, "repo"),
+  });
+
+  return {
+    ...serializeProject(result.project),
+    repo: result.repo,
+    discoveredPullRequests: result.discoveredPullRequests,
+    discoveredWorktrees: result.discoveredWorktrees,
+    warnings: result.warnings,
+  };
+}
+
+async function buildLoopsCreateResponse(
+  context: LooperdApiContext,
+  request: Request,
+) {
+  assertMethod(request, ["POST"], "/api/v1/loops");
+  const body = await parseJsonBody(request);
+  const projectId = readRequiredString(body, "projectId");
+
+  if (!context.store.projects.getById(projectId)) {
+    throw new ApiError(
+      "PROJECT_NOT_FOUND",
+      404,
+      `Project not found: ${projectId}`,
+    );
+  }
+
+  const type = readRequiredString(body, "type");
+  const targetType = readRequiredString(body, "targetType");
+  const status = readOptionalString(body, "status") ?? "running";
+
+  if (
+    (type === "reviewer" || type === "fixer") &&
+    !isCodingAgentConfigured(context.config)
+  ) {
+    throw new ApiError(
+      "AGENT_NOT_CONFIGURED",
+      400,
+      `Cannot create ${type} loop without config.agent.vendor`,
+    );
+  }
+
+  const loop = createLoopRecord({
+    context,
+    projectId,
+    type,
+    targetType,
+    taskId: readOptionalString(body, "taskId") ?? undefined,
+    repo: readOptionalString(body, "repo") ?? undefined,
+    prNumber: readOptionalPositiveInteger(body, "prNumber") ?? undefined,
+    status,
+    now: new Date().toISOString(),
+  });
+
+  return loop;
+}
+
+function createLoopRecord(input: {
+  context: LooperdApiContext;
+  projectId: string;
+  type: string;
+  targetType: string;
+  taskId?: string;
+  repo?: string;
+  prNumber?: number;
+  status: string;
+  now: string;
+}) {
+  const { context } = input;
+  const target =
+    input.targetType === "task"
+      ? defineTaskLoopTarget(readRequiredValue(input.taskId, "taskId"))
+      : definePullRequestLoopTarget(
+          readRequiredValue(input.repo, "repo"),
+          readRequiredNumber(input.prNumber, "prNumber"),
+        );
+
+  const loop = createLoop({
+    id: randomUUID(),
+    projectId: input.projectId,
+    type: input.type as never,
+    target,
+    status: input.status as never,
+    createdAt: input.now,
+    updatedAt: input.now,
+  });
+
+  const existingLoops = context.store.loops.list().map((candidate) => ({
+    id: candidate.id,
+    projectId: candidate.projectId,
+    type: candidate.type as never,
+    status: candidate.status as never,
+    target: toLoopTarget(candidate),
+  }));
+
+  try {
+    assertUniqueActiveLoop({
+      loops: existingLoops,
+      candidate: loop,
+    });
+  } catch (error) {
+    throw new ApiError(
+      "LOOP_CONFLICT",
+      409,
+      error instanceof Error ? error.message : "Active loop already exists",
+    );
+  }
+
+  const record = {
+    id: loop.id,
+    projectId: loop.projectId,
+    type: loop.type,
+    targetType: target.targetType,
+    targetId:
+      target.targetType === "task"
+        ? `task:${target.taskId}`
+        : `pr:${target.repo}:${target.prNumber}`,
+    repo: target.targetType === "pull_request" ? target.repo : null,
+    prNumber: target.targetType === "pull_request" ? target.prNumber : null,
+    status: loop.status,
+    configJson: null,
+    metadataJson: null,
+    lastRunAt: null,
+    nextRunAt: loop.status === "running" ? input.now : null,
+    createdAt: input.now,
+    updatedAt: input.now,
+  };
+
+  context.store.loops.upsert(record);
+  return record;
+}
+
+function serializeTask(
+  context: LooperdApiContext,
+  task: ReturnType<Store["tasks"]["getById"]> extends infer T
+    ? Exclude<T, null>
+    : never,
+) {
+  const metadata = parsePayloadJson(task.metadataJson ?? "null") as Record<
+    string,
+    unknown
+  > | null;
+
+  return {
+    ...task,
+    specPath: typeof metadata?.specPath === "string" ? metadata.specPath : null,
+    items: context.store.taskItems.listByTask(task.id),
+  };
+}
+
+function toLoopTarget(loop: ReturnType<Store["loops"]["list"]>[number]) {
+  if (loop.targetType === "task") {
+    const taskId =
+      loop.targetId?.startsWith("task:") === true
+        ? loop.targetId.slice("task:".length)
+        : loop.targetId;
+
+    return defineTaskLoopTarget(
+      readRequiredValue(taskId ?? undefined, "taskId"),
+    );
+  }
+
+  return definePullRequestLoopTarget(
+    readRequiredValue(loop.repo ?? undefined, "repo"),
+    readRequiredNumber(loop.prNumber ?? undefined, "prNumber"),
+  );
+}
+
+function readTaskItems(
+  body: Record<string, unknown>,
+  taskId: string,
+  now: string,
+) {
+  const raw = body.items;
+  if (raw == null) {
+    return [];
+  }
+
+  if (!Array.isArray(raw)) {
+    throw new ApiError("VALIDATION_FAILED", 400, "items must be an array");
+  }
+
+  return raw.map((value, index) => {
+    if (typeof value !== "string" || value.trim().length === 0) {
+      throw new ApiError(
+        "VALIDATION_FAILED",
+        400,
+        `items[${index}] must be a non-empty string`,
+      );
+    }
+
+    return createTaskItem({
+      id: randomUUID(),
+      taskId,
+      content: value.trim(),
+      status: "pending",
+      position: index,
+      source: "user",
+      createdAt: now,
+      updatedAt: now,
+    });
+  });
+}
+
+function readRequiredValue(
+  value: string | undefined,
+  fieldName: string,
+): string {
+  if (!value) {
+    throw new ApiError("VALIDATION_FAILED", 400, `${fieldName} is required`);
+  }
+
+  return value;
+}
+
+function readRequiredNumber(
+  value: number | undefined,
+  fieldName: string,
+): number {
+  if (!value) {
+    throw new ApiError("VALIDATION_FAILED", 400, `${fieldName} is required`);
+  }
+
+  return value;
+}
+
+async function parseJsonBody(
+  request: Request,
+): Promise<Record<string, unknown>> {
+  try {
+    const body = await request.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new ApiError(
+        "VALIDATION_FAILED",
+        400,
+        "request body must be a JSON object",
+      );
+    }
+
+    return body as Record<string, unknown>;
+  } catch (error) {
+    if (error instanceof ApiError) {
+      throw error;
+    }
+
+    throw new ApiError("VALIDATION_FAILED", 400, "invalid JSON request body");
+  }
+}
+
+function readRequiredString(
+  body: Record<string, unknown>,
+  fieldName: string,
+): string {
+  const value = body[fieldName];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new ApiError(
+      "VALIDATION_FAILED",
+      400,
+      `${fieldName} must be a non-empty string`,
+    );
+  }
+
+  return value.trim();
+}
+
+function readOptionalString(
+  body: Record<string, unknown>,
+  fieldName: string,
+): string | null {
+  const value = body[fieldName];
+  if (value == null) {
+    return null;
+  }
+
+  if (typeof value !== "string") {
+    throw new ApiError(
+      "VALIDATION_FAILED",
+      400,
+      `${fieldName} must be a string`,
+    );
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function readOptionalPositiveInteger(
+  body: Record<string, unknown>,
+  fieldName: string,
+): number | null {
+  const value = body[fieldName];
+  if (value == null) {
+    return null;
+  }
+
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new ApiError(
+      "VALIDATION_FAILED",
+      400,
+      `${fieldName} must be a positive integer`,
+    );
+  }
+
+  return value as number;
+}
+
+function buildPullRequestRouteResponse(
+  context: LooperdApiContext,
+  pathname: string,
+) {
+  const parts = pathname.split("/").filter(Boolean);
+  const encodedRepo = parts[3];
+  const maybePrNumber = parts[4];
+  const subresource = parts[5];
+
+  if (!encodedRepo || !maybePrNumber) {
+    throw new ApiError(
+      "VALIDATION_FAILED",
+      400,
+      "repo and prNumber are required",
+    );
+  }
+
+  const repo = decodeURIComponent(encodedRepo);
+  const prNumber = Number(maybePrNumber);
+
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    throw new ApiError(
+      "VALIDATION_FAILED",
+      400,
+      "prNumber must be a positive integer",
+    );
+  }
+
+  const snapshot = context.store.pullRequestSnapshots.getLatest(repo, prNumber);
+
+  if (!snapshot) {
+    throw new ApiError(
+      "PR_NOT_FOUND",
+      404,
+      `Pull request not found: ${repo}#${prNumber}`,
+    );
+  }
+
+  if (subresource === "status") {
+    return buildPullRequestStatusResponse(context, snapshot);
+  }
+
+  if (subresource) {
+    throw new ApiError("ROUTE_NOT_FOUND", 404, `Unknown route: ${pathname}`);
+  }
+
+  return serializePullRequest(context, snapshot);
+}
+
+function buildPullRequestStatusResponse(
+  context: LooperdApiContext,
+  snapshot: PullRequestSnapshotRecord,
+) {
+  const loopMatches = findPullRequestLoops(
+    context,
+    snapshot.repo,
+    snapshot.prNumber,
+  );
+  const runMatches = loopMatches.flatMap((loop) =>
+    context.store.runs.listByLoop(loop.id),
+  );
+  const taskMatch = context.store.tasks
+    .list()
+    .find(
+      (task) =>
+        task.repo === snapshot.repo && task.prNumber === snapshot.prNumber,
+    );
+
+  return {
+    repo: snapshot.repo,
+    prNumber: snapshot.prNumber,
+    reviewState: snapshot.reviewState,
+    checksSummary: snapshot.checksSummary,
+    unresolvedThreadCount: snapshot.unresolvedThreadCount ?? 0,
+    capturedAt: snapshot.capturedAt,
+    reviewer: findLatestLoopStatus(loopMatches, "reviewer"),
+    fixer: findLatestLoopStatus(loopMatches, "fixer"),
+    loopStatus: summarizeRunAndLoopState(loopMatches, runMatches),
+    task: taskMatch
+      ? {
+          id: taskMatch.id,
+          title: taskMatch.title,
+          status: taskMatch.status,
+        }
+      : null,
+  };
+}
+
+function findPullRequestLoops(
+  context: LooperdApiContext,
+  repo: string,
+  prNumber: number,
+) {
+  return context.store.loops
+    .list()
+    .filter((loop) => loop.repo === repo && loop.prNumber === prNumber);
+}
+
+function findLatestLoopStatus(
+  loops: { type: string; status: string }[],
+  type: "reviewer" | "fixer",
+) {
+  return loops.find((loop) => loop.type === type)?.status ?? null;
+}
+
+function collectPullRequestIdentities(
+  snapshots: PullRequestSnapshotRecord[],
+  loops: ReturnType<Store["loops"]["list"]>,
+  tasks: ReturnType<Store["tasks"]["list"]>,
+) {
+  const seen = new Set<string>();
+  const identities: Array<{
+    repo: string;
+    prNumber: number;
+    projectId: string;
+  }> = [];
+
+  const appendIdentity = (item: {
+    repo?: string | null;
+    prNumber?: number | null;
+    projectId: string;
+  }) => {
+    if (!item.repo || !item.prNumber) {
+      return;
+    }
+
+    const key = `${item.repo}#${item.prNumber}`;
+    if (seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    identities.push({
+      repo: item.repo,
+      prNumber: item.prNumber,
+      projectId: item.projectId,
+    });
+  };
+
+  for (const snapshot of snapshots) {
+    appendIdentity(snapshot);
+  }
+
+  for (const loop of loops) {
+    appendIdentity(loop);
+  }
+
+  for (const task of tasks) {
+    appendIdentity(task);
+  }
+
+  return identities;
+}
+
+function summarizeRunAndLoopState(
+  loopMatches: { status: string }[],
+  runs: RunRecord[],
+) {
+  return {
+    loops: loopMatches.map((loop) => loop.status),
+    latestRunStatus: runs[0]?.status,
+    runningRunCount: runs.filter((run) => run.status === "running").length,
+  };
+}
+
+function dedupeLatestSnapshots(
+  snapshots: PullRequestSnapshotRecord[],
+): PullRequestSnapshotRecord[] {
+  const seen = new Set<string>();
+  const deduped: PullRequestSnapshotRecord[] = [];
+
+  for (const snapshot of snapshots) {
+    const key = `${snapshot.repo}#${snapshot.prNumber}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(snapshot);
+  }
+
+  return deduped;
+}
+
+function serializePullRequest(
+  context: LooperdApiContext,
+  snapshot: PullRequestSnapshotRecord,
+) {
+  return serializePullRequestListItem(
+    context,
+    snapshot.repo,
+    snapshot.prNumber,
+    snapshot,
+  );
+}
+
+function serializePullRequestListItem(
+  context: LooperdApiContext,
+  repo: string,
+  prNumber: number,
+  snapshot: PullRequestSnapshotRecord | undefined,
+) {
+  const loopMatches = findPullRequestLoops(context, repo, prNumber);
+  const task = context.store.tasks
+    .list()
+    .find(
+      (candidate) => candidate.repo === repo && candidate.prNumber === prNumber,
+    );
+
+  return {
+    repo,
+    prNumber,
+    projectId: snapshot?.projectId ?? task?.projectId ?? null,
+    headSha: snapshot?.headSha ?? null,
+    baseSha: snapshot?.baseSha ?? null,
+    title: snapshot?.title ?? null,
+    body: snapshot?.body ?? null,
+    author: snapshot?.author ?? null,
+    diffRef: snapshot?.diffRef ?? null,
+    checksSummary: snapshot?.checksSummary ?? null,
+    unresolvedThreadCount: snapshot?.unresolvedThreadCount ?? 0,
+    reviewState: snapshot?.reviewState ?? null,
+    capturedAt: snapshot?.capturedAt ?? null,
+    reviewer: findLatestLoopStatus(loopMatches, "reviewer"),
+    fixer: findLatestLoopStatus(loopMatches, "fixer"),
+    task: task
+      ? {
+          id: task.id,
+          title: task.title,
+          status: task.status,
+        }
+      : null,
+  };
+}
+
+function serializeProject(
+  project: ReturnType<Store["projects"]["list"]>[number],
+) {
+  const metadata = parsePayloadJson(project.metadataJson ?? "null") as Record<
+    string,
+    unknown
+  > | null;
+
+  return {
+    id: project.id,
+    name: project.name,
+    repoPath: project.repoPath,
+    baseBranch: project.baseBranch,
+    archived: project.archived,
+    repo:
+      typeof metadata?.repo === "string" && metadata.repo.length > 0
+        ? metadata.repo
+        : null,
+    worktreeRoot:
+      typeof metadata?.worktreeRoot === "string" &&
+      metadata.worktreeRoot.length > 0
+        ? metadata.worktreeRoot
+        : null,
+    createdAt: project.createdAt,
+    updatedAt: project.updatedAt,
+  };
+}
+
+function deriveProjectIdFromPath(repoPath: string): string {
+  const segments = repoPath.split(/[\\/]+/).filter(Boolean);
+  const lastSegment = segments.at(-1) ?? "project";
+  const normalized = lastSegment
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return normalized || "project";
+}
+
+function serializeEvent(event: EventLogRecord) {
+  return {
+    ...event,
+    payload: parsePayloadJson(event.payloadJson),
+  };
+}
+
+function parsePayloadJson(payloadJson: string): unknown {
+  try {
+    return JSON.parse(payloadJson);
+  } catch {
+    return payloadJson;
+  }
+}
+
+function jsonResponse<T>(status: number, payload: ApiResponse<T>): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+    },
+  });
+}
+
+function isCodingAgentConfigured(config: LooperConfig): boolean {
+  return Boolean(config.agent.vendor);
+}
+
+function toApiError(error: unknown): ApiError {
+  if (error instanceof ApiError) {
+    return error;
+  }
+
+  return new ApiError(
+    "INTERNAL_ERROR",
+    500,
+    error instanceof Error ? error.message : "Unknown error",
+  );
+}
