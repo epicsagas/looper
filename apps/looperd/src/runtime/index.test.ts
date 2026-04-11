@@ -165,7 +165,9 @@ class FakeGitHubGateway {
 }
 
 class ThrowingDiscoveryGitHubGateway extends FakeGitHubGateway {
-  public override async listOpenPullRequests() {
+  public override async listOpenPullRequests(): ReturnType<
+    FakeGitHubGateway["listOpenPullRequests"]
+  > {
     throw new Error("discovery failed");
   }
 }
@@ -345,11 +347,11 @@ describe("createLooperdRuntime", () => {
     store.close();
 
     const originalKill = process.kill;
-    process.kill = ((() => {
+    process.kill = (() => {
       const error = new Error("permission denied") as NodeJS.ErrnoException;
       error.code = "EPERM";
       throw error;
-    }) as typeof process.kill);
+    }) as typeof process.kill;
 
     try {
       const runtime = createLooperdRuntime({

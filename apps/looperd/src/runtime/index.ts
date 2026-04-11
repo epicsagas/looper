@@ -652,12 +652,33 @@ class BasicLooperdRuntime implements LooperdRuntime {
       return;
     }
 
+    const runnableTypes = new Set<"reviewer" | "fixer" | "worker">();
+    if (this.reviewerRunner) {
+      runnableTypes.add("reviewer");
+    }
+    if (this.fixerRunner) {
+      runnableTypes.add("fixer");
+    }
+    if (this.workerRunner) {
+      runnableTypes.add("worker");
+    }
+    if (runnableTypes.size === 0) {
+      return;
+    }
+
     for (
       let count = 0;
       count < this.options.config.scheduler.maxConcurrentRuns;
       count += 1
     ) {
-      const next = this.scheduler.listScheduled(1)[0];
+      const next = this.scheduler
+        .listScheduled(this.options.config.scheduler.maxConcurrentRuns)
+        .find(
+          (
+            item,
+          ): item is typeof item & { type: "reviewer" | "fixer" | "worker" } =>
+            isRunnableQueueType(item.type) && runnableTypes.has(item.type),
+        );
       if (
         !next ||
         (next.type !== "reviewer" &&
@@ -667,9 +688,12 @@ class BasicLooperdRuntime implements LooperdRuntime {
         return;
       }
 
-      const claimed = this.scheduler.claimNext(`looperd-${next.type}`);
+      const claimed = this.scheduler.claimNextOfType(
+        `looperd-${next.type}`,
+        next.type,
+      );
       if (!claimed) {
-        return;
+        continue;
       }
 
       if (claimed.type === "reviewer" && this.reviewerRunner) {
@@ -844,6 +868,12 @@ function isAgentConfigured(config: LooperConfig): config is LooperConfig & {
   return Boolean(config.agent.vendor);
 }
 
+function isRunnableQueueType(
+  value: string,
+): value is "reviewer" | "fixer" | "worker" {
+  return value === "reviewer" || value === "fixer" || value === "worker";
+}
+
 function shouldRequeueLoop(loop: LoopRecord, latestRun: RunRecord): boolean {
   if (loop.status === "paused") {
     return false;
@@ -891,9 +921,14 @@ function requeueLoopWork(input: {
   });
 
   if (input.loop.targetType === "task") {
-    const taskId = input.loop.targetId.startsWith("task:")
-      ? input.loop.targetId.slice("task:".length)
-      : input.loop.targetId;
+    const taskTargetId = input.loop.targetId;
+    if (!taskTargetId) {
+      return null;
+    }
+
+    const taskId = taskTargetId.startsWith("task:")
+      ? taskTargetId.slice("task:".length)
+      : taskTargetId;
     const task = input.store.tasks.getById(taskId);
     return scheduler.enqueue({
       projectId: input.loop.projectId,

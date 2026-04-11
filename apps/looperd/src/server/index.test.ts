@@ -469,13 +469,14 @@ describe("createLooperdApi", () => {
     };
     expect(startedTaskBody.data.status).toBe("in_progress");
     expect(startedTaskBody.data.loopId).toBeTruthy();
-    expect(store.queue.findActiveByDedupe(`worker:${createTaskBody.data.id}`))
-      .toMatchObject({
-        loopId: startedTaskBody.data.loopId,
-        taskId: createTaskBody.data.id,
-        type: "worker",
-        status: "queued",
-      });
+    expect(
+      store.queue.findActiveByDedupe(`worker:${createTaskBody.data.id}`),
+    ).toMatchObject({
+      loopId: startedTaskBody.data.loopId,
+      taskId: createTaskBody.data.id,
+      type: "worker",
+      status: "queued",
+    });
 
     const pausedTaskResponse = await api.handle(
       new Request(
@@ -553,9 +554,10 @@ describe("createLooperdApi", () => {
         method: "POST",
       }),
     );
-    const startCompletedTaskBody = (await startCompletedTaskResponse.json()) as {
-      error: { code: string };
-    };
+    const startCompletedTaskBody =
+      (await startCompletedTaskResponse.json()) as {
+        error: { code: string };
+      };
     expect(startCompletedTaskResponse.status).toBe(409);
     expect(startCompletedTaskBody.error.code).toBe("INVALID_TASK_TRANSITION");
 
@@ -580,9 +582,10 @@ describe("createLooperdApi", () => {
         method: "POST",
       }),
     );
-    const startCompletedLoopBody = (await startCompletedLoopResponse.json()) as {
-      error: { code: string };
-    };
+    const startCompletedLoopBody =
+      (await startCompletedLoopResponse.json()) as {
+        error: { code: string };
+      };
     expect(startCompletedLoopResponse.status).toBe(409);
     expect(startCompletedLoopBody.error.code).toBe("INVALID_LOOP_TRANSITION");
 

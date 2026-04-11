@@ -974,9 +974,14 @@ function ensureLoopQueueItem(
   });
 
   if (loop.targetType === "task") {
-    const taskId = loop.targetId.startsWith("task:")
-      ? loop.targetId.slice("task:".length)
-      : loop.targetId;
+    const taskTargetId = loop.targetId;
+    if (!taskTargetId) {
+      throw new Error(`Task loop ${loop.id} is missing targetId`);
+    }
+
+    const taskId = taskTargetId.startsWith("task:")
+      ? taskTargetId.slice("task:".length)
+      : taskTargetId;
     const task = context.store.tasks.getById(taskId);
     return scheduler.enqueue({
       projectId: loop.projectId,
