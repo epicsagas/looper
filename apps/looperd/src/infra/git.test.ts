@@ -193,4 +193,68 @@ describe("GitWorktreeGateway", () => {
 
     store.close();
   });
+
+  test("reuses an existing branch worktree record when recreating worktree", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "looper-git-"));
+    cleanupPaths.push(rootDir);
+    const repoPath = join(rootDir, "repo");
+    const worktreeRoot = join(rootDir, "worktrees");
+    await mkdir(repoPath, { recursive: true });
+
+    await runGit(["init", "-b", "main"], repoPath);
+    await runGit(["config", "user.email", "test@example.com"], repoPath);
+    await runGit(["config", "user.name", "Looper Test"], repoPath);
+    await writeFile(join(repoPath, "README.md"), "hello\n");
+    await runGit(["add", "README.md"], repoPath);
+    await runGit(["commit", "-m", "init"], repoPath);
+
+    const store = new SqliteStore({
+      dbPath: join(rootDir, "state", "looper.sqlite"),
+    });
+    store.initialize({ autoMigrate: true });
+    const now = "2026-04-11T12:00:00.000Z";
+    store.projects.upsert({
+      id: "project_1",
+      name: "Looper",
+      repoPath,
+      baseBranch: "main",
+      archived: false,
+      metadataJson: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    store.worktrees.upsert({
+      id: "existing-record",
+      projectId: "project_1",
+      taskId: null,
+      repoPath,
+      worktreePath: repoPath,
+      branch: "feature/fixer",
+      baseBranch: "main",
+      status: "active",
+      headSha: null,
+      metadataJson: JSON.stringify({ recovered: false }),
+      createdAt: now,
+      updatedAt: now,
+      cleanedAt: null,
+    });
+
+    const gateway = new GitWorktreeGateway({ gitPath: "git", store });
+    const worktree = await gateway.createWorktree({
+      projectId: "project_1",
+      repoPath,
+      worktreeRoot,
+      branch: "feature/fixer",
+      baseBranch: "main",
+      prNumber: 42,
+    });
+
+    expect(worktree.id).toBe("existing-record");
+    expect(worktree.worktreePath).not.toBe(repoPath);
+    expect(store.worktrees.getByBranch("project_1", "feature/fixer")?.id).toBe(
+      "existing-record",
+    );
+
+    store.close();
+  });
 });

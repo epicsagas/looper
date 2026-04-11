@@ -563,9 +563,7 @@ export class SqliteStore implements Store {
     ): QueueItemRecord | null => {
       return this.coordinator.withTransaction(() => {
         const row = this.coordinator.db
-          .query(
-            `${SCHEDULED_QUEUE_BASE_QUERY} AND qi.type = ?2${SCHEDULED_QUEUE_ORDER_BY} LIMIT 1`,
-          )
+          .query(`${SCHEDULED_QUEUE_BASE_QUERY} AND qi.type = ?2${SCHEDULED_QUEUE_ORDER_BY} LIMIT 1`)
           .get(nowIso, type) as Record<string, unknown> | null;
 
         if (!row) {

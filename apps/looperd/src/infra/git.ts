@@ -120,10 +120,14 @@ export class GitWorktreeGateway {
 
     const headSha = await this.getHeadSha(worktreePath);
     const nowIso = this.now().toISOString();
+    const existingRecord = this.options.store?.worktrees.getByBranch(
+      input.projectId,
+      input.branch,
+    );
     const record: WorktreeRecord = {
-      id: randomUUID(),
+      id: existingRecord?.id ?? randomUUID(),
       projectId: input.projectId,
-      taskId: input.taskId ?? null,
+      taskId: input.taskId ?? existingRecord?.taskId ?? null,
       repoPath: input.repoPath,
       worktreePath,
       branch: input.branch,
@@ -131,7 +135,7 @@ export class GitWorktreeGateway {
       status: "active",
       headSha,
       metadataJson: JSON.stringify({ recovered: false }),
-      createdAt: nowIso,
+      createdAt: existingRecord?.createdAt ?? nowIso,
       updatedAt: nowIso,
       cleanedAt: null,
     };
@@ -234,10 +238,21 @@ export class GitWorktreeGateway {
     protectedBranches?: string[];
   }): Promise<void> {
     this.assertWritableBranch(input.branch, input.protectedBranches ?? []);
-    await this.runGit(
-      ["worktree", "remove", "--force", input.worktreePath],
-      input.repoPath,
-    );
+    try {
+      await this.runGit(
+        ["worktree", "remove", "--force", input.worktreePath],
+        input.repoPath,
+      );
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !/is not a working tree|does not exist|not found|No such file/i.test(
+          error.message,
+        )
+      ) {
+        throw error;
+      }
+    }
 
     const existing = this.options.store?.worktrees.getByBranch(
       input.projectId,

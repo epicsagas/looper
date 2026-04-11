@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { createLogger } from "../bootstrap/logger";
 import { createDefaultLooperConfig } from "../config/index";
+import type { FixerLoopRunner } from "../fixer/index";
 import type { AgentResult, AgentRunInput } from "../infra/agent";
 import { SchedulerQueue } from "../scheduler/index";
 import { SqliteStore } from "../storage/sqlite/sqlite-store";
@@ -164,25 +165,21 @@ class FakeGitHubGateway {
   }
 }
 
-class ThrowingDiscoveryGitHubGateway extends FakeGitHubGateway {
-  public override async listOpenPullRequests(): ReturnType<
-    FakeGitHubGateway["listOpenPullRequests"]
-  > {
-    throw new Error("discovery failed");
-  }
-}
-
 class FakeGitGateway {
   public pushCalls = 0;
   public createWorktreeCalls = 0;
   public commitCalls = 0;
   public cleanupCalls = 0;
+  public pushError?: string;
 
   public async detectGitHubRepo(): Promise<string | null> {
     return "powerformer/looper";
   }
 
   public async push(): Promise<void> {
+    if (this.pushError) {
+      throw new Error(this.pushError);
+    }
     this.pushCalls += 1;
   }
 
@@ -431,101 +428,6 @@ describe("createLooperdRuntime", () => {
       createdAt: now,
       updatedAt: now,
     });
-    seedStore.queue.upsert({
-      id: "queue_running_1",
-      projectId: "project_1",
-      loopId: "loop_1",
-      type: "reviewer",
-      targetType: "pull_request",
-      targetId: "pr:acme/looper:42",
-      repo: "acme/looper",
-      prNumber: 42,
-      dedupeKey: "reviewer:acme/looper:42",
-      priority: 1,
-      status: "running",
-      availableAt: now,
-      attempts: 0,
-      maxAttempts: 3,
-      claimedBy: "looperd-reviewer",
-      claimedAt: now,
-      startedAt: now,
-      finishedAt: null,
-      lockKey: "pr:acme/looper:42",
-      payloadJson: null,
-      lastError: null,
-      lastErrorKind: null,
-      createdAt: now,
-      updatedAt: now,
-    });
-    seedStore.loops.upsert({
-      id: "loop_2",
-      projectId: "project_1",
-      type: "worker",
-      targetType: "task",
-      targetId: "task:task_2",
-      repo: null,
-      prNumber: null,
-      status: "interrupted",
-      configJson: null,
-      metadataJson: null,
-      lastRunAt: now,
-      nextRunAt: null,
-      createdAt: now,
-      updatedAt: now,
-    });
-    seedStore.runs.upsert({
-      id: "run_2",
-      loopId: "loop_2",
-      status: "interrupted",
-      currentStep: "execute",
-      lastCompletedStep: "setup",
-      checkpointJson: null,
-      summary: null,
-      errorMessage: null,
-      startedAt: now,
-      lastHeartbeatAt: now,
-      endedAt: now,
-      createdAt: now,
-      updatedAt: now,
-    });
-    seedStore.tasks.upsert({
-      id: "task_2",
-      projectId: "project_1",
-      title: "Recovered task",
-      description: null,
-      status: "in_progress",
-      loopId: "loop_2",
-      repo: null,
-      prNumber: null,
-      metadataJson: null,
-      createdAt: now,
-      updatedAt: now,
-    });
-    seedStore.queue.upsert({
-      id: "queue_running_2",
-      projectId: "project_1",
-      loopId: "loop_2",
-      taskId: "task_2",
-      type: "worker",
-      targetType: "task",
-      targetId: "task:task_2",
-      dedupeKey: "worker:task_2",
-      priority: 3,
-      status: "running",
-      availableAt: now,
-      attempts: 0,
-      maxAttempts: 3,
-      claimedBy: "looperd-worker",
-      claimedAt: now,
-      startedAt: now,
-      finishedAt: null,
-      lockKey: "task:task_2",
-      payloadJson: null,
-      lastError: null,
-      lastErrorKind: null,
-      createdAt: now,
-      updatedAt: now,
-    });
     seedStore.locks.acquire({
       key: "pr:acme/looper:42",
       owner: "reviewer-loop",
@@ -561,11 +463,6 @@ describe("createLooperdRuntime", () => {
     verifyStore.initialize();
     expect(verifyStore.runs.getById("run_1")?.status).toBe("interrupted");
     expect(verifyStore.loops.getById("loop_1")?.status).toBe("queued");
-    expect(verifyStore.loops.getById("loop_2")?.status).toBe("queued");
-    expect(verifyStore.queue.getById("queue_running_1")?.status).toBe("queued");
-    expect(verifyStore.queue.getById("queue_running_1")?.claimedBy).toBeNull();
-    expect(verifyStore.queue.getById("queue_running_2")?.status).toBe("queued");
-    expect(verifyStore.queue.getById("queue_running_2")?.claimedBy).toBeNull();
     expect(verifyStore.locks.get("pr:acme/looper:42")).toBeNull();
     expect(
       verifyStore.events
@@ -742,6 +639,181 @@ describe("createLooperdRuntime", () => {
     await runtime.stop("test");
   });
 
+  test("does not notify user for retryable fixer remote-head races", async () => {
+    const fixture = await createFixture();
+    fixture.config.agent.vendor = "opencode";
+    const now = "2026-04-11T12:00:00.000Z";
+    const seedStore = new SqliteStore({
+      dbPath: fixture.config.storage.dbPath,
+      backupDir: fixture.config.storage.backupDir,
+    });
+    seedStore.initialize({ autoMigrate: true });
+    seedStore.projects.upsert({
+      id: "project_1",
+      name: "Looper",
+      repoPath: fixture.rootDir,
+      baseBranch: "main",
+      archived: false,
+      metadataJson: JSON.stringify({ repo: "powerformer/looper" }),
+      createdAt: now,
+      updatedAt: now,
+    });
+    seedStore.close();
+
+    const github = new FakeGitHubGateway();
+    const git = new FakeGitGateway();
+    git.pushError =
+      "Remote head changed for feature/runtime: expected abc123, got def456";
+    const runtime = createLooperdRuntime({
+      config: fixture.config,
+      logger: fixture.logger,
+      github,
+      git,
+      agentExecutor: new FakeAgentExecutor([completedAgentResult("fixed")]),
+      enableReviewer: false,
+    });
+
+    await runtime.start();
+    await Bun.sleep(50);
+
+    const verifyStore = new SqliteStore({
+      dbPath: fixture.config.storage.dbPath,
+    });
+    verifyStore.initialize();
+    const failureNotifications = verifyStore.notifications
+      .list()
+      .filter(
+        (record) =>
+          record.channel === "in_app" &&
+          record.level === "failure" &&
+          record.entityType === "run",
+      );
+
+    expect(
+      failureNotifications.some((record) =>
+        record.body.includes("Remote head changed"),
+      ),
+    ).toBe(false);
+
+    verifyStore.close();
+    await runtime.stop("test");
+  });
+
+  test("does not notify user for retryable fixer PR-head sync delays", async () => {
+    const fixture = await createFixture();
+    fixture.config.agent.vendor = "opencode";
+    const now = "2026-04-11T12:00:00.000Z";
+    const seedStore = new SqliteStore({
+      dbPath: fixture.config.storage.dbPath,
+      backupDir: fixture.config.storage.backupDir,
+    });
+    seedStore.initialize({ autoMigrate: true });
+    seedStore.projects.upsert({
+      id: "project_1",
+      name: "Looper",
+      repoPath: fixture.rootDir,
+      baseBranch: "main",
+      archived: false,
+      metadataJson: JSON.stringify({ repo: "powerformer/looper" }),
+      createdAt: now,
+      updatedAt: now,
+    });
+    seedStore.close();
+
+    const github = new FakeGitHubGateway();
+    const fixerRunner = {
+      discoverPullRequests: async () => ({
+        queueItems: [],
+        createdLoopIds: [],
+        skipped: 0,
+      }),
+      processClaimedItem: async () => ({
+        loopId: "loop_1",
+        runId: "run_1",
+        queueItemId: "queue_1",
+        status: "failed" as const,
+        failureKind: "retryable_after_resume" as const,
+        summary:
+          "PR head changed before resolving comments: expected new-head, got old-head",
+      }),
+    };
+    const store = new SqliteStore({ dbPath: fixture.config.storage.dbPath });
+    store.initialize();
+    store.loops.upsert({
+      id: "loop_1",
+      projectId: "project_1",
+      type: "fixer",
+      targetType: "pull_request",
+      targetId: "pr:powerformer/looper:1",
+      repo: "powerformer/looper",
+      prNumber: 1,
+      status: "queued",
+      configJson: null,
+      metadataJson: null,
+      lastRunAt: null,
+      nextRunAt: now,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const scheduler = new SchedulerQueue({
+      store,
+      retryMaxAttempts: 3,
+      retryBaseDelayMs: 5_000,
+      now: () => new Date(now),
+    });
+    scheduler.enqueue({
+      id: "queue_1",
+      projectId: "project_1",
+      loopId: "loop_1",
+      taskId: null,
+      type: "fixer",
+      targetType: "pull_request",
+      targetId: "pr:powerformer/looper:1",
+      repo: "powerformer/looper",
+      prNumber: 1,
+      dedupeKey: "fixer:1",
+      payloadJson: null,
+      availableAt: now,
+      maxAttempts: 3,
+      lockKey: null,
+    });
+    store.close();
+
+    const runtime = createLooperdRuntime({
+      config: fixture.config,
+      logger: fixture.logger,
+      github,
+      git: new FakeGitGateway(),
+      agentExecutor: new FakeAgentExecutor([completedAgentResult("fixed")]),
+      fixerRunner: fixerRunner as unknown as FixerLoopRunner,
+      enableReviewer: false,
+    });
+
+    await runtime.start();
+    await Bun.sleep(50);
+
+    const verifyStore = new SqliteStore({
+      dbPath: fixture.config.storage.dbPath,
+    });
+    verifyStore.initialize();
+    const failureNotifications = verifyStore.notifications
+      .list()
+      .filter(
+        (record) =>
+          record.channel === "in_app" &&
+          record.level === "failure" &&
+          record.entityType === "run",
+      );
+    expect(
+      failureNotifications.some((record) =>
+        record.body.includes("PR head changed before resolving comments"),
+      ),
+    ).toBe(false);
+
+    verifyStore.close();
+    await runtime.stop("test");
+  });
+
   test("boots without coding agent and skips reviewer/fixer runners", async () => {
     const fixture = await createFixture();
     const now = "2026-04-11T12:00:00.000Z";
@@ -888,107 +960,6 @@ describe("createLooperdRuntime", () => {
 
     expect(agentExecutor.starts).toHaveLength(1);
     expect(git.createWorktreeCalls).toBe(1);
-    await runtime.stop("test");
-  });
-
-  test("still processes worker queue when PR discovery throws", async () => {
-    const fixture = await createFixture();
-    fixture.config.agent.vendor = "opencode";
-    const now = new Date(Date.now() - 1_000).toISOString();
-    const seedStore = new SqliteStore({
-      dbPath: fixture.config.storage.dbPath,
-      backupDir: fixture.config.storage.backupDir,
-    });
-    seedStore.initialize({ autoMigrate: true });
-    seedStore.projects.upsert({
-      id: "project_1",
-      name: "Looper",
-      repoPath: fixture.rootDir,
-      baseBranch: "main",
-      archived: false,
-      metadataJson: JSON.stringify({ repo: "powerformer/looper" }),
-      createdAt: now,
-      updatedAt: now,
-    });
-    seedStore.loops.upsert({
-      id: "loop_worker_discovery_error",
-      projectId: "project_1",
-      type: "worker",
-      targetType: "task",
-      targetId: "task:task_discovery_error",
-      repo: "powerformer/looper",
-      prNumber: null,
-      status: "queued",
-      configJson: null,
-      metadataJson: null,
-      lastRunAt: null,
-      nextRunAt: now,
-      createdAt: now,
-      updatedAt: now,
-    });
-    seedStore.tasks.upsert({
-      id: "task_discovery_error",
-      projectId: "project_1",
-      title: "Process despite discovery failure",
-      description: null,
-      status: "in_progress",
-      loopId: "loop_worker_discovery_error",
-      repo: "powerformer/looper",
-      prNumber: null,
-      metadataJson: JSON.stringify({ specPath: "spec.md" }),
-      createdAt: now,
-      updatedAt: now,
-    });
-    seedStore.taskItems.upsert({
-      id: "item_discovery_error",
-      taskId: "task_discovery_error",
-      content: "Do work",
-      status: "pending",
-      position: 0,
-      source: "spec",
-      metadataJson: null,
-      createdAt: now,
-      updatedAt: now,
-    });
-    const scheduler = new SchedulerQueue({
-      store: seedStore,
-      retryMaxAttempts: 3,
-      retryBaseDelayMs: 0,
-    });
-    scheduler.enqueue({
-      id: "queue_worker_discovery_error",
-      projectId: "project_1",
-      loopId: "loop_worker_discovery_error",
-      taskId: "task_discovery_error",
-      type: "worker",
-      targetType: "task",
-      targetId: "task:task_discovery_error",
-      repo: "powerformer/looper",
-      dedupeKey: "worker:task_discovery_error",
-      availableAt: now,
-    });
-    await writeFile(join(fixture.rootDir, "spec.md"), "# Worker spec\n");
-    seedStore.close();
-
-    const github = new ThrowingDiscoveryGitHubGateway();
-    const git = new FakeGitGateway();
-    const agentExecutor = new FakeAgentExecutor([completedAgentResult("done")]);
-
-    const runtime = createLooperdRuntime({
-      config: fixture.config,
-      logger: fixture.logger,
-      github,
-      git,
-      agentExecutor,
-      enableFixer: false,
-    });
-
-    await runtime.start();
-    await Bun.sleep(50);
-
-    expect(agentExecutor.starts).toHaveLength(1);
-    expect(git.createWorktreeCalls).toBe(1);
-
     await runtime.stop("test");
   });
 

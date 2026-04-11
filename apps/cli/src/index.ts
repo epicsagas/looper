@@ -1017,9 +1017,7 @@ async function loadCliConfig(options: {
           readNumber(fileConfig, ["server", "port"]) ||
           4310,
         baseUrl: readString(fileConfig, ["server", "baseUrl"]),
-        localToken:
-          options.env.LOOPER_TOKEN ??
-          readString(fileConfig, ["server", "localToken"]),
+        localToken: options.env.LOOPER_TOKEN,
       },
       daemon: {
         mode:

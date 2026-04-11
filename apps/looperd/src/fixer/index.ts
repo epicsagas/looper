@@ -5,6 +5,7 @@ import type { Logger } from "../bootstrap/logger";
 import type { AgentResult, AgentRunInput } from "../infra/agent";
 import { appendCompletionInstruction } from "../infra/agent-prompt";
 import { CommandExecutionError, runCommand } from "../infra/command";
+import { RemoteHeadChangedError } from "../infra/git";
 import type {
   GitHubPullRequestDetail,
   GitHubPullRequestSummary,
@@ -138,6 +139,7 @@ export interface FixerLoopRunnerOptions {
   allowAutoCommit?: boolean;
   allowAutoPush?: boolean;
   allowRiskyFixes?: boolean;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export interface FixerDiscoveryResult {
@@ -249,6 +251,7 @@ export class FixerLoopRunner {
   private readonly allowAutoCommit: boolean;
   private readonly allowAutoPush: boolean;
   private readonly allowRiskyFixes: boolean;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(private readonly options: FixerLoopRunnerOptions) {
     this.now = options.now ?? (() => new Date());
@@ -258,6 +261,9 @@ export class FixerLoopRunner {
     this.allowAutoCommit = options.allowAutoCommit ?? true;
     this.allowAutoPush = options.allowAutoPush ?? true;
     this.allowRiskyFixes = options.allowRiskyFixes ?? false;
+    this.sleep =
+      options.sleep ??
+      ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
   public async discoverPullRequests(input: {
@@ -1136,6 +1142,21 @@ export class FixerLoopRunner {
       throw new FixerLoopError(message, "retryable_after_resume");
     }
 
+    const finalHeadSha = requireString(
+      reconcile.finalHeadSha,
+      "reconcileCommits.finalHeadSha",
+    );
+    await this.waitForPullRequestHeadSha({
+      repo: requireString(input.queueItem.repo, "queueItem.repo"),
+      prNumber: requireNumber(input.queueItem.prNumber, "queueItem.prNumber"),
+      expectedHeadSha: finalHeadSha,
+      cwd: input.project.repoPath,
+      attempts: 5,
+      delayMs: 1_000,
+      failureMessage: (actualHeadSha) =>
+        `PR head did not update after push: expected ${finalHeadSha}, got ${actualHeadSha ?? "unknown"}`,
+    });
+
     const metadata = parseJsonObject(input.loop.metadataJson);
     const pushedAt = this.nowIso();
     this.updateLoop(input.loop, {
@@ -1196,23 +1217,17 @@ export class FixerLoopRunner {
     }
 
     const finalHeadSha = input.checkpoint.reconcileCommits?.finalHeadSha;
-    const currentPr = await this.options.github.viewPullRequest({
-      repo: requireString(input.queueItem.repo, "queueItem.repo"),
-      prNumber: requireNumber(input.queueItem.prNumber, "queueItem.prNumber"),
-      cwd: requireString(
-        requireWorktree(input.checkpoint).path,
-        "worktree.path",
-      ),
-    });
-    if (
-      finalHeadSha &&
-      currentPr.headSha &&
-      currentPr.headSha !== finalHeadSha
-    ) {
-      throw new FixerLoopError(
-        `PR head changed before resolving comments: expected ${finalHeadSha}, got ${currentPr.headSha}`,
-        "retryable_after_resume",
-      );
+    if (finalHeadSha) {
+      await this.waitForPullRequestHeadSha({
+        repo: requireString(input.queueItem.repo, "queueItem.repo"),
+        prNumber: requireNumber(input.queueItem.prNumber, "queueItem.prNumber"),
+        expectedHeadSha: finalHeadSha,
+        cwd: input.project.repoPath,
+        attempts: 5,
+        delayMs: 1_000,
+        failureMessage: (actualHeadSha) =>
+          `PR head changed before resolving comments: expected ${finalHeadSha}, got ${actualHeadSha ?? "unknown"}`,
+      });
     }
 
     const repo = requireString(input.queueItem.repo, "queueItem.repo");
@@ -1245,7 +1260,7 @@ export class FixerLoopRunner {
         await this.options.github.resolveReviewThread({
           repo,
           threadId: item.threadId,
-          cwd: worktreePath,
+          cwd: input.project.repoPath,
         });
         upsertResolvedComment(resolvedComments.items, {
           fixItemId: item.id,
@@ -1313,7 +1328,7 @@ export class FixerLoopRunner {
       const detail = await this.options.github.viewPullRequest({
         repo,
         prNumber,
-        cwd: input.checkpoint.worktree?.path ?? input.project.repoPath,
+        cwd: input.project.repoPath,
       });
       return {
         ...input.checkpoint,
@@ -1337,23 +1352,31 @@ export class FixerLoopRunner {
     const checkpoint = parseCheckpoint(latestRun?.checkpointJson);
     const lastCompletedStep = asFixerStep(latestRun?.lastCompletedStep);
     const failedStep = asFixerStep(latestRun?.currentStep);
+    const restartFromDiscovery = shouldRestartFromDiscovery({
+      latestRunStatus: latestRun?.status,
+      failedStep,
+    });
     const resumeFromPrepare = shouldResumeFromPrepare({
       latestRunStatus: latestRun?.status,
       failedStep,
       checkpoint,
     });
-    const resumedCheckpoint = resumeFromPrepare
-      ? rewindCheckpointForPrepareRetry(checkpoint)
-      : checkpoint;
+    const resumedCheckpoint = restartFromDiscovery
+      ? { resumePolicy: "replay_step" }
+      : resumeFromPrepare
+        ? rewindCheckpointForPrepareRetry(checkpoint)
+        : checkpoint;
     const startStep: FixerStep =
       latestRun &&
       (latestRun.status === "failed" || latestRun.status === "interrupted") &&
-      (resumeFromPrepare || lastCompletedStep)
-        ? resumeFromPrepare
-          ? "prepare-worktree"
-          : (nextFixerStep(
-              requireFixerStep(lastCompletedStep, "lastCompletedStep"),
-            ) ?? "discover-pr")
+      (restartFromDiscovery || resumeFromPrepare || lastCompletedStep)
+        ? restartFromDiscovery
+          ? "discover-pr"
+          : resumeFromPrepare
+            ? "prepare-worktree"
+            : (nextFixerStep(
+                requireFixerStep(lastCompletedStep, "lastCompletedStep"),
+              ) ?? "discover-pr")
         : "discover-pr";
     const resumed =
       Boolean(latestRun) &&
@@ -1366,9 +1389,11 @@ export class FixerLoopRunner {
       status: "running",
       currentStep: startStep,
       lastCompletedStep: resumed
-        ? resumeFromPrepare
-          ? (previousFixerStep(startStep) ?? null)
-          : (lastCompletedStep ?? null)
+        ? restartFromDiscovery
+          ? null
+          : resumeFromPrepare
+            ? (previousFixerStep(startStep) ?? null)
+            : (lastCompletedStep ?? null)
         : null,
       checkpointJson: JSON.stringify(
         resumed
@@ -1547,6 +1572,9 @@ export class FixerLoopRunner {
     if (error instanceof FixerLoopError) {
       return error;
     }
+    if (error instanceof RemoteHeadChangedError) {
+      return new FixerLoopError(error.message, "retryable_after_resume");
+    }
     if (error instanceof CommandExecutionError) {
       return new FixerLoopError(error.message, "retryable_transient");
     }
@@ -1653,6 +1681,37 @@ export class FixerLoopRunner {
           error instanceof Error ? error.message : "Unknown cleanup failure",
       });
     }
+  }
+
+  private async waitForPullRequestHeadSha(input: {
+    repo: string;
+    prNumber: number;
+    expectedHeadSha: string;
+    cwd: string;
+    attempts: number;
+    delayMs: number;
+    failureMessage: (actualHeadSha?: string) => string;
+  }): Promise<void> {
+    let actualHeadSha: string | undefined;
+    for (let attempt = 0; attempt < input.attempts; attempt += 1) {
+      const currentPr = await this.options.github.viewPullRequest({
+        repo: input.repo,
+        prNumber: input.prNumber,
+        cwd: input.cwd,
+      });
+      actualHeadSha = currentPr.headSha;
+      if (actualHeadSha === input.expectedHeadSha) {
+        return;
+      }
+      if (attempt < input.attempts - 1) {
+        await this.sleep(input.delayMs);
+      }
+    }
+
+    throw new FixerLoopError(
+      input.failureMessage(actualHeadSha),
+      "retryable_after_resume",
+    );
   }
 
   private async runValidation(input: {
@@ -2001,6 +2060,20 @@ function shouldResumeFromPrepare(input: {
   return ["repair", "reconcile-commits", "validate", "push"].includes(
     input.failedStep ?? "discover-pr",
   );
+}
+
+function shouldRestartFromDiscovery(input: {
+  latestRunStatus?: string | null;
+  failedStep: FixerStep | null;
+}): boolean {
+  if (
+    input.latestRunStatus !== "failed" &&
+    input.latestRunStatus !== "interrupted"
+  ) {
+    return false;
+  }
+
+  return input.failedStep === "prepare-worktree";
 }
 
 function shouldRebuildWorktree(checkpoint: FixerCheckpoint): boolean {

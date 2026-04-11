@@ -81,6 +81,9 @@ export interface CreateLooperdRuntimeOptions {
     | "cleanupWorktree"
   >;
   agentExecutor?: RuntimeAgentExecutor;
+  reviewerRunner?: ReviewerLoopRunner;
+  fixerRunner?: FixerLoopRunner;
+  workerRunner?: WorkerLoopRunner;
   enableReviewer?: boolean;
   enableFixer?: boolean;
 }
@@ -172,14 +175,16 @@ class BasicLooperdRuntime implements LooperdRuntime {
       this.git = git;
 
       if (github && agentExecutor && this.options.enableReviewer !== false) {
-        this.reviewerRunner = new ReviewerLoopRunner({
-          store,
-          scheduler: this.scheduler,
-          github,
-          agentExecutor,
-          logger: this.options.logger,
-          allowAutoApprove: this.options.config.defaults.allowAutoApprove,
-        });
+        this.reviewerRunner =
+          this.options.reviewerRunner ??
+          new ReviewerLoopRunner({
+            store,
+            scheduler: this.scheduler,
+            github,
+            agentExecutor,
+            logger: this.options.logger,
+            allowAutoApprove: this.options.config.defaults.allowAutoApprove,
+          });
       }
 
       if (
@@ -188,30 +193,34 @@ class BasicLooperdRuntime implements LooperdRuntime {
         agentExecutor &&
         this.options.enableFixer !== false
       ) {
-        this.fixerRunner = new FixerLoopRunner({
-          store,
-          scheduler: this.scheduler,
-          github,
-          git,
-          agentExecutor,
-          logger: this.options.logger,
-          allowAutoCommit: this.options.config.defaults.allowAutoCommit,
-          allowAutoPush: this.options.config.defaults.allowAutoPush,
-          allowRiskyFixes: this.options.config.defaults.allowRiskyFixes,
-        });
+        this.fixerRunner =
+          this.options.fixerRunner ??
+          new FixerLoopRunner({
+            store,
+            scheduler: this.scheduler,
+            github,
+            git,
+            agentExecutor,
+            logger: this.options.logger,
+            allowAutoCommit: this.options.config.defaults.allowAutoCommit,
+            allowAutoPush: this.options.config.defaults.allowAutoPush,
+            allowRiskyFixes: this.options.config.defaults.allowRiskyFixes,
+          });
       }
 
       if (github && git && agentExecutor) {
-        this.workerRunner = new WorkerLoopRunner({
-          store,
-          scheduler: this.scheduler,
-          github,
-          git,
-          agentExecutor,
-          logger: this.options.logger,
-          allowAutoCommit: this.options.config.defaults.allowAutoCommit,
-          allowAutoPush: this.options.config.defaults.allowAutoPush,
-        });
+        this.workerRunner =
+          this.options.workerRunner ??
+          new WorkerLoopRunner({
+            store,
+            scheduler: this.scheduler,
+            github,
+            git,
+            agentExecutor,
+            logger: this.options.logger,
+            allowAutoCommit: this.options.config.defaults.allowAutoCommit,
+            allowAutoPush: this.options.config.defaults.allowAutoPush,
+          });
       }
 
       const projects =
@@ -448,12 +457,6 @@ class BasicLooperdRuntime implements LooperdRuntime {
       }
 
       if (shouldRequeueLoop(loop, latestRun)) {
-        requeueLoopWork({
-          config: this.options.config,
-          store: this.store,
-          loop,
-          nowIso,
-        });
         this.store.loops.upsert({
           ...loop,
           status: "queued",
@@ -598,14 +601,7 @@ class BasicLooperdRuntime implements LooperdRuntime {
 
     this.schedulerTickRunning = true;
     try {
-      try {
-        await this.discoverPullRequests();
-      } catch (error) {
-        this.options.logger.warn("looperd pull request discovery failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-
+      await this.discoverPullRequests();
       await this.processScheduledWork();
     } catch (error) {
       this.options.logger.warn("looperd scheduler tick failed", {
@@ -652,33 +648,12 @@ class BasicLooperdRuntime implements LooperdRuntime {
       return;
     }
 
-    const runnableTypes = new Set<"reviewer" | "fixer" | "worker">();
-    if (this.reviewerRunner) {
-      runnableTypes.add("reviewer");
-    }
-    if (this.fixerRunner) {
-      runnableTypes.add("fixer");
-    }
-    if (this.workerRunner) {
-      runnableTypes.add("worker");
-    }
-    if (runnableTypes.size === 0) {
-      return;
-    }
-
     for (
       let count = 0;
       count < this.options.config.scheduler.maxConcurrentRuns;
       count += 1
     ) {
-      const next = this.scheduler
-        .listScheduled(this.options.config.scheduler.maxConcurrentRuns)
-        .find(
-          (
-            item,
-          ): item is typeof item & { type: "reviewer" | "fixer" | "worker" } =>
-            isRunnableQueueType(item.type) && runnableTypes.has(item.type),
-        );
+      const next = this.scheduler.listScheduled(1)[0];
       if (
         !next ||
         (next.type !== "reviewer" &&
@@ -688,18 +663,18 @@ class BasicLooperdRuntime implements LooperdRuntime {
         return;
       }
 
-      const claimed = this.scheduler.claimNextOfType(
-        `looperd-${next.type}`,
-        next.type,
-      );
+      const claimed = this.scheduler.claimNext(`looperd-${next.type}`);
       if (!claimed) {
-        continue;
+        return;
       }
 
       if (claimed.type === "reviewer" && this.reviewerRunner) {
         try {
           const result = await this.reviewerRunner.processClaimedItem(claimed);
-          if (result.status === "failed") {
+          if (
+            result.status === "failed" &&
+            shouldNotifyRunFailure(claimed.type, result)
+          ) {
             void this.notifySystemEvent({
               projectId: claimed.projectId ?? undefined,
               loopId: result.loopId,
@@ -733,7 +708,10 @@ class BasicLooperdRuntime implements LooperdRuntime {
       if (claimed.type === "fixer" && this.fixerRunner) {
         try {
           const result = await this.fixerRunner.processClaimedItem(claimed);
-          if (result.status === "failed") {
+          if (
+            result.status === "failed" &&
+            shouldNotifyRunFailure(claimed.type, result)
+          ) {
             void this.notifySystemEvent({
               projectId: claimed.projectId ?? undefined,
               loopId: result.loopId,
@@ -767,7 +745,10 @@ class BasicLooperdRuntime implements LooperdRuntime {
       if (claimed.type === "worker" && this.workerRunner) {
         try {
           const result = await this.workerRunner.processClaimedItem(claimed);
-          if (result.status === "failed") {
+          if (
+            result.status === "failed" &&
+            shouldNotifyRunFailure(claimed.type, result)
+          ) {
             void this.notifySystemEvent({
               projectId: claimed.projectId ?? undefined,
               loopId: result.loopId,
@@ -868,12 +849,6 @@ function isAgentConfigured(config: LooperConfig): config is LooperConfig & {
   return Boolean(config.agent.vendor);
 }
 
-function isRunnableQueueType(
-  value: string,
-): value is "reviewer" | "fixer" | "worker" {
-  return value === "reviewer" || value === "fixer" || value === "worker";
-}
-
 function shouldRequeueLoop(loop: LoopRecord, latestRun: RunRecord): boolean {
   if (loop.status === "paused") {
     return false;
@@ -884,81 +859,6 @@ function shouldRequeueLoop(loop: LoopRecord, latestRun: RunRecord): boolean {
   }
 
   return loop.status === "running" || latestRun.status === "interrupted";
-}
-
-function requeueLoopWork(input: {
-  config: LooperConfig;
-  store: SqliteStore;
-  loop: LoopRecord;
-  nowIso: string;
-}) {
-  const activeItem = input.store.queue
-    .list()
-    .find(
-      (candidate) =>
-        candidate.loopId === input.loop.id &&
-        (candidate.status === "queued" || candidate.status === "running"),
-    );
-
-  if (activeItem) {
-    input.store.queue.upsert({
-      ...activeItem,
-      status: "queued",
-      availableAt: input.nowIso,
-      claimedBy: null,
-      claimedAt: null,
-      finishedAt: null,
-      updatedAt: input.nowIso,
-    });
-    return activeItem;
-  }
-
-  const scheduler = new SchedulerQueue({
-    store: input.store,
-    retryMaxAttempts: input.config.scheduler.retryMaxAttempts,
-    retryBaseDelayMs: input.config.scheduler.retryBaseDelayMs,
-    now: () => new Date(input.nowIso),
-  });
-
-  if (input.loop.targetType === "task") {
-    const taskTargetId = input.loop.targetId;
-    if (!taskTargetId) {
-      return null;
-    }
-
-    const taskId = taskTargetId.startsWith("task:")
-      ? taskTargetId.slice("task:".length)
-      : taskTargetId;
-    const task = input.store.tasks.getById(taskId);
-    return scheduler.enqueue({
-      projectId: input.loop.projectId,
-      loopId: input.loop.id,
-      taskId,
-      type: "worker",
-      targetType: "task",
-      targetId: `task:${taskId}`,
-      repo: task?.repo ?? input.loop.repo,
-      dedupeKey: `worker:${taskId}`,
-    });
-  }
-
-  if (!input.loop.repo || !input.loop.prNumber) {
-    return null;
-  }
-
-  return scheduler.enqueue({
-    projectId: input.loop.projectId,
-    loopId: input.loop.id,
-    type: input.loop.type as "reviewer" | "fixer",
-    targetType: "pull_request",
-    targetId: `pr:${input.loop.repo}:${input.loop.prNumber}`,
-    repo: input.loop.repo,
-    prNumber: input.loop.prNumber,
-    dedupeKey:
-      input.loop.type === "reviewer"
-        ? `reviewer:${input.loop.repo}:${input.loop.prNumber}`
-        : `manual:${input.loop.type}:${input.loop.id}`,
-  });
 }
 
 function parseProjectMetadata(
@@ -980,6 +880,17 @@ function parseProjectMetadata(
 
 function readMetadataString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function shouldNotifyRunFailure(
+  type: "reviewer" | "fixer" | "worker",
+  result: { failureKind?: string; summary: string },
+): boolean {
+  if (type === "fixer" && result.failureKind === "retryable_after_resume") {
+    return false;
+  }
+
+  return true;
 }
 
 export function createLooperdRuntime(
