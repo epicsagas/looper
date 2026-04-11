@@ -127,6 +127,8 @@ export const AUDIT_EVENT_TYPES = [
   "loop.step.completed",
   "loop.step.failed",
   "run.started",
+  "run.completed",
+  "run.failed",
   "run.cancelled",
   "agent.invoked",
   "agent.heartbeat",
@@ -134,6 +136,7 @@ export const AUDIT_EVENT_TYPES = [
   "agent.timed_out",
   "agent.killed",
   "pr.review.posted",
+  "pr.branch.pushed",
   "task.checklist.updated",
   "notification.sent",
 ] as const;

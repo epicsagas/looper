@@ -93,6 +93,8 @@ export interface DefaultsConfig {
   allowAutoCommit: boolean;
   allowAutoPush: boolean;
   allowAutoApprove: boolean;
+  allowAutoMerge: boolean;
+  allowRiskyFixes: boolean;
   openPrStrategy?: OpenPrStrategy;
 }
 

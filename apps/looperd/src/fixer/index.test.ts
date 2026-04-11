@@ -316,4 +316,193 @@ describe("FixerLoopRunner", () => {
 
     fixture.store.close();
   });
+
+  test("writes audit events for fixer lifecycle and push", async () => {
+    const fixture = await createFixture();
+    const github = new FakeGitHubGateway({
+      views: [
+        { comments: [{ id: "c1", state: "UNRESOLVED" }], checks: [] },
+        { comments: [{ id: "c1", state: "UNRESOLVED" }], checks: [] },
+        { comments: [], checks: [] },
+      ],
+    });
+    const git = new FakeGitGateway();
+    const agent = new FakeAgentExecutor([completedAgentResult("fixed")]);
+    const runner = new FixerLoopRunner({
+      store: fixture.store,
+      scheduler: fixture.queue,
+      github,
+      git,
+      agentExecutor: agent,
+      now: () => fixture.now,
+      validationRunner: async (): Promise<FixerValidationResult> => ({
+        passed: true,
+        summary: "ok",
+      }),
+    });
+
+    await runner.discoverPullRequests({
+      projectId: "project_1",
+      repo: "acme/looper",
+    });
+    const claimed = fixture.queue.claimNext("fixer-1");
+    if (!claimed) {
+      throw new Error("Expected claimed fixer queue item");
+    }
+
+    await runner.processClaimedItem(claimed);
+
+    const eventTypes = fixture.store.events
+      .list()
+      .map((event) => event.eventType);
+    expect(eventTypes).toContain("loop.started");
+    expect(eventTypes).toContain("run.started");
+    expect(eventTypes).toContain("loop.step.started");
+    expect(eventTypes).toContain("loop.step.completed");
+    expect(eventTypes).toContain("pr.branch.pushed");
+
+    fixture.store.close();
+  });
+
+  test("pauses for manual push when auto push is disabled", async () => {
+    const fixture = await createFixture();
+    const github = new FakeGitHubGateway({
+      views: [
+        { comments: [{ id: "c1", state: "UNRESOLVED" }], checks: [] },
+        { comments: [{ id: "c1", state: "UNRESOLVED" }], checks: [] },
+      ],
+    });
+    const git = new FakeGitGateway();
+    const agent = new FakeAgentExecutor([completedAgentResult("fixed")]);
+    const runner = new FixerLoopRunner({
+      store: fixture.store,
+      scheduler: fixture.queue,
+      github,
+      git,
+      agentExecutor: agent,
+      now: () => fixture.now,
+      validationRunner: async (): Promise<FixerValidationResult> => ({
+        passed: true,
+        summary: "ok",
+      }),
+      allowAutoPush: false,
+    });
+
+    await runner.discoverPullRequests({
+      projectId: "project_1",
+      repo: "acme/looper",
+    });
+    const claimed = fixture.queue.claimNext("fixer-1");
+    if (!claimed) {
+      throw new Error("Expected claimed fixer queue item");
+    }
+
+    const result = await runner.processClaimedItem(claimed);
+    expect(result.status).toBe("skipped");
+    expect(result.summary).toContain("Auto push disabled");
+    expect(git.pushCalls).toBe(0);
+
+    fixture.store.close();
+  });
+
+  test("skips agent execution when auto commit is disabled", async () => {
+    const fixture = await createFixture();
+    const github = new FakeGitHubGateway({
+      views: [
+        { comments: [{ id: "c1", state: "UNRESOLVED" }], checks: [] },
+        { comments: [{ id: "c1", state: "UNRESOLVED" }], checks: [] },
+      ],
+    });
+    const git = new FakeGitGateway();
+    const agent = new FakeAgentExecutor([completedAgentResult("fixed")]);
+    const runner = new FixerLoopRunner({
+      store: fixture.store,
+      scheduler: fixture.queue,
+      github,
+      git,
+      agentExecutor: agent,
+      now: () => fixture.now,
+      validationRunner: async (): Promise<FixerValidationResult> => ({
+        passed: true,
+        summary: "ok",
+      }),
+      allowAutoCommit: false,
+    });
+
+    await runner.discoverPullRequests({
+      projectId: "project_1",
+      repo: "acme/looper",
+    });
+    const claimed = fixture.queue.claimNext("fixer-1");
+    if (!claimed) {
+      throw new Error("Expected claimed fixer queue item");
+    }
+
+    const result = await runner.processClaimedItem(claimed);
+    expect(result.status).toBe("skipped");
+    expect(result.summary).toContain("Auto commit disabled");
+    expect(agent.starts).toHaveLength(0);
+    expect(git.pushCalls).toBe(0);
+
+    fixture.store.close();
+  });
+
+  test("skips risky conflict fixes when policy is disabled", async () => {
+    const fixture = await createFixture();
+    const github = new FakeGitHubGateway({
+      views: [
+        { comments: [], checks: [], headSha: "abc123" },
+        { comments: [], checks: [], headSha: "abc123" },
+      ],
+    });
+    github.viewPullRequest = async (_input) => ({
+      number: 42,
+      title: "Fix me",
+      body: "body",
+      state: "OPEN",
+      isDraft: false,
+      reviewDecision: "CHANGES_REQUESTED",
+      headRefName: "feature/fixer",
+      baseRefName: "main",
+      headSha: "abc123",
+      baseSha: "base123",
+      author: "octocat",
+      comments: [],
+      reviews: [],
+      checks: [],
+      hasConflicts: true,
+    });
+    const git = new FakeGitGateway();
+    const agent = new FakeAgentExecutor([completedAgentResult("fixed")]);
+    const runner = new FixerLoopRunner({
+      store: fixture.store,
+      scheduler: fixture.queue,
+      github,
+      git,
+      agentExecutor: agent,
+      now: () => fixture.now,
+      validationRunner: async (): Promise<FixerValidationResult> => ({
+        passed: true,
+        summary: "ok",
+      }),
+      allowRiskyFixes: false,
+    });
+
+    await runner.discoverPullRequests({
+      projectId: "project_1",
+      repo: "acme/looper",
+    });
+    const claimed = fixture.queue.claimNext("fixer-1");
+    if (!claimed) {
+      throw new Error("Expected claimed fixer queue item");
+    }
+
+    const result = await runner.processClaimedItem(claimed);
+    expect(result.status).toBe("skipped");
+    expect(result.summary).toContain("risky conflict fixes");
+    expect(agent.starts).toHaveLength(0);
+    expect(git.pushCalls).toBe(0);
+
+    fixture.store.close();
+  });
 });

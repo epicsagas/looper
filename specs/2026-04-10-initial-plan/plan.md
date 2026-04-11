@@ -190,45 +190,45 @@
 
 ## 13. 审计、日志与状态可见性
 
-- [ ] 为 loop 生命周期写审计事件
-- [ ] 为 run 生命周期写审计事件
-- [ ] 为 agent 调用写审计事件
-- [ ] 为 PR 回写动作写审计事件
-- [ ] 为通知发送写审计事件
-- [ ] 让 `/api/v1/status` 聚合 loop / run / scheduler / tools 状态
-- [ ] 让 CLI `looper status` 直接消费聚合状态接口
+- [x] 为 loop 生命周期写审计事件
+- [x] 为 run 生命周期写审计事件
+- [x] 为 agent 调用写审计事件
+- [x] 为 PR 回写动作写审计事件
+- [x] 为通知发送写审计事件
+- [x] 让 `/api/v1/status` 聚合 loop / run / scheduler / tools 状态
+- [x] 让 CLI `looper status` 直接消费聚合状态接口
 
 ## 14. 安全与策略开关
 
-- [ ] 默认关闭 auto approve
-- [ ] 默认关闭 auto merge
-- [ ] 默认关闭高风险自动修复动作
-- [ ] 配置化控制 commit / push 权限
-- [ ] 配置化控制通知开关
-- [ ] 对受保护分支写操作加防护
+- [x] 默认关闭 auto approve
+- [x] 默认关闭 auto merge
+- [x] 默认关闭高风险自动修复动作
+- [x] 配置化控制 commit / push 权限
+- [x] 配置化控制通知开关
+- [x] 对受保护分支写操作加防护
 
 ## 15. 测试与验证
 
-- [ ] 为配置加载与校验写测试
-- [ ] 为 migration runner 写测试
-- [ ] 为 SQLite 关键读写写测试
-- [ ] 为锁语义写测试
-- [ ] 为 scheduler 重试与退避写测试
+- [x] 为配置加载与校验写测试
+- [x] 为 migration runner 写测试
+- [x] 为 SQLite 关键读写写测试
+- [x] 为锁语义写测试
+- [x] 为 scheduler 重试与退避写测试
 - [x] 为 reviewer loop 第一条链路写集成测试
 - [x] 为 worker 基础链路写集成测试
 - [x] 为 fixer 基础链路写集成测试
-- [ ] 为恢复流程写测试
-- [ ] 为 agent timeout / kill 写测试
+- [x] 为恢复流程写测试
+- [x] 为 agent timeout / kill 写测试
 
 ## 16. MVP 验收 checklist
 
-- [ ] `looperd` 能本地启动并通过 `/healthz`
-- [ ] `looperd` 首次启动会自动执行 migrations
-- [ ] CLI 能查看系统状态与配置
-- [ ] reviewer loop 能发现 PR、调用 agent、成功回写 review
-- [ ] worker loop 能基于 checklist 推进任务并创建 PR
-- [ ] fixer loop 能处理基础修复场景并回推结果
-- [ ] 所有核心状态都能落 SQLite
-- [ ] 关键副作用都有审计记录
-- [ ] 中断后可恢复到一致状态
-- [ ] 受保护分支不会被直接修改
+- [x] `looperd` 能本地启动并通过 `/healthz`
+- [x] `looperd` 首次启动会自动执行 migrations
+- [x] CLI 能查看系统状态与配置
+- [x] reviewer loop 能发现 PR、调用 agent、成功回写 review
+- [x] worker loop 能基于 checklist 推进任务并创建 PR
+- [x] fixer loop 能处理基础修复场景并回推结果
+- [x] 所有核心状态都能落 SQLite
+- [x] 关键副作用都有审计记录
+- [x] 中断后可恢复到一致状态
+- [x] 受保护分支不会被直接修改

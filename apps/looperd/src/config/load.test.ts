@@ -72,6 +72,10 @@ describe("loadLooperConfig", () => {
         "7000",
         "--git-path",
         "/cli/git",
+        "--allow-auto-commit",
+        "false",
+        "--allow-auto-push",
+        "false",
       ],
       cwd: fixture.rootDir,
       env: {
@@ -79,8 +83,11 @@ describe("loadLooperConfig", () => {
         LOOPER_DB_PATH: join(fixture.rootDir, "env.sqlite"),
         LOOPER_LOG_DIR: join(fixture.rootDir, "env-logs"),
         LOOPER_OSASCRIPT_ENABLED: "false",
+        LOOPER_IN_APP_NOTIFICATIONS: "false",
         LOOPER_BUN_PATH: "/env/bun",
         LOOPER_GH_PATH: "/env/gh",
+        LOOPER_ALLOW_AUTO_COMMIT: "true",
+        LOOPER_ALLOW_AUTO_APPROVE: "true",
       },
     });
 
@@ -93,6 +100,10 @@ describe("loadLooperConfig", () => {
     expect(loaded.config.tools.bunPath).toBe("/env/bun");
     expect(loaded.config.tools.gitPath).toBe("/cli/git");
     expect(loaded.config.tools.ghPath).toBe("/env/gh");
+    expect(loaded.config.defaults.allowAutoCommit).toBe(false);
+    expect(loaded.config.defaults.allowAutoPush).toBe(false);
+    expect(loaded.config.defaults.allowAutoApprove).toBe(true);
+    expect(loaded.config.notifications.inApp).toBe(false);
     expect(loaded.config.notifications.osascript.enabled).toBe(false);
     expect(loaded.metadata.configFilePresent).toBe(true);
   });
@@ -113,6 +124,9 @@ describe("loadLooperConfig", () => {
         scheduler: { pollIntervalSeconds: 2 },
         notifications: {
           osascript: { enabled: true, throttleWindowSeconds: 60 },
+        },
+        defaults: {
+          allowAutoCommit: "yes",
         },
       }),
     );

@@ -21,6 +21,10 @@ function isPositiveInteger(value: unknown): value is number {
   return Number.isInteger(value) && typeof value === "number" && value > 0;
 }
 
+function isBoolean(value: unknown): value is boolean {
+  return typeof value === "boolean";
+}
+
 async function ensureWritablePath(
   path: string,
   kind: "directory" | "file-parent",
@@ -201,6 +205,41 @@ export async function validateLooperConfig(
     issues.push({
       path: "defaults.baseBranch",
       message: "must be a non-empty string",
+    });
+  }
+
+  if (!isBoolean(config.defaults.allowAutoCommit)) {
+    issues.push({
+      path: "defaults.allowAutoCommit",
+      message: "must be a boolean",
+    });
+  }
+
+  if (!isBoolean(config.defaults.allowAutoPush)) {
+    issues.push({
+      path: "defaults.allowAutoPush",
+      message: "must be a boolean",
+    });
+  }
+
+  if (!isBoolean(config.defaults.allowAutoApprove)) {
+    issues.push({
+      path: "defaults.allowAutoApprove",
+      message: "must be a boolean",
+    });
+  }
+
+  if (!isBoolean(config.defaults.allowAutoMerge)) {
+    issues.push({
+      path: "defaults.allowAutoMerge",
+      message: "must be a boolean",
+    });
+  }
+
+  if (!isBoolean(config.defaults.allowRiskyFixes)) {
+    issues.push({
+      path: "defaults.allowRiskyFixes",
+      message: "must be a boolean",
     });
   }
 

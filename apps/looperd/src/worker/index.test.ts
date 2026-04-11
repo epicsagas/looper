@@ -385,4 +385,86 @@ describe("WorkerLoopRunner", () => {
 
     fixture.store.close();
   });
+
+  test("pauses for manual PR opening when auto push is disabled", async () => {
+    const fixture = await createFixture();
+    const git = new FakeGitGateway(fixture.worktreeRoot);
+    const github = new FakeGitHubGateway();
+    const agent = new FakeAgentExecutor([
+      completedAgentResult("Implemented slice and committed changes", [
+        "abc123",
+      ]),
+    ]);
+    const runner = new WorkerLoopRunner({
+      store: fixture.store,
+      scheduler: fixture.queue,
+      git,
+      github,
+      agentExecutor: agent,
+      now: () => fixture.now,
+      validationRunner: async (): Promise<WorkerValidationResult> => ({
+        passed: true,
+        summary: "ok",
+        output: "ok",
+      }),
+      openPrStrategy: "all_done",
+      allowAutoPush: false,
+    });
+
+    const claimed = fixture.queue.claimNext("worker-1");
+    if (!claimed) {
+      throw new Error("Expected claimed worker queue item");
+    }
+
+    const result = await runner.processClaimedItem(claimed);
+    expect(result.status).toBe("skipped");
+    expect(result.summary).toContain("Auto push disabled");
+    expect(git.pushCalls).toBe(0);
+    expect(github.createPullRequestCalls).toHaveLength(0);
+    expect(fixture.store.loops.getById("loop_worker_1")?.status).toBe(
+      "completed",
+    );
+
+    fixture.store.close();
+  });
+
+  test("skips agent execution when auto commit is disabled", async () => {
+    const fixture = await createFixture();
+    const git = new FakeGitGateway(fixture.worktreeRoot);
+    const github = new FakeGitHubGateway();
+    const agent = new FakeAgentExecutor([
+      completedAgentResult("Implemented slice and committed changes", [
+        "abc123",
+      ]),
+    ]);
+    const runner = new WorkerLoopRunner({
+      store: fixture.store,
+      scheduler: fixture.queue,
+      git,
+      github,
+      agentExecutor: agent,
+      now: () => fixture.now,
+      validationRunner: async (): Promise<WorkerValidationResult> => ({
+        passed: true,
+        summary: "ok",
+        output: "ok",
+      }),
+      openPrStrategy: "all_done",
+      allowAutoCommit: false,
+    });
+
+    const claimed = fixture.queue.claimNext("worker-1");
+    if (!claimed) {
+      throw new Error("Expected claimed worker queue item");
+    }
+
+    const result = await runner.processClaimedItem(claimed);
+    expect(result.status).toBe("skipped");
+    expect(result.summary).toContain("Auto commit disabled");
+    expect(agent.starts).toHaveLength(0);
+    expect(git.pushCalls).toBe(0);
+    expect(github.createPullRequestCalls).toHaveLength(0);
+
+    fixture.store.close();
+  });
 });

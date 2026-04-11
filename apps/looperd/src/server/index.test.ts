@@ -79,6 +79,33 @@ async function createFixture() {
     createdAt: now,
     updatedAt: now,
   });
+  store.queue.upsert({
+    id: "queue_1",
+    projectId: "project_1",
+    loopId: "loop_1",
+    taskId: "task_1",
+    type: "worker",
+    targetType: "task",
+    targetId: "task_1",
+    repo: "acme/looper",
+    prNumber: 42,
+    dedupeKey: "worker:task_1",
+    priority: 3,
+    status: "queued",
+    availableAt: now,
+    attempts: 0,
+    maxAttempts: 3,
+    claimedBy: null,
+    claimedAt: null,
+    startedAt: null,
+    finishedAt: null,
+    lockKey: "task:task_1",
+    payloadJson: null,
+    lastError: null,
+    lastErrorKind: null,
+    createdAt: now,
+    updatedAt: now,
+  });
   store.taskItems.upsert({
     id: "task_item_1",
     taskId: "task_1",
@@ -145,12 +172,29 @@ describe("createLooperdApi", () => {
     );
     const statusBody = (await statusResponse.json()) as {
       ok: boolean;
-      data: { storage: { schemaVersion: string } };
+      data: {
+        storage: { schemaVersion: string };
+        scheduler: { queuedItems: number; totalRuns: number };
+        safety: {
+          allowAutoCommit: boolean;
+          allowAutoPush: boolean;
+          allowAutoApprove: boolean;
+          allowRiskyFixes: boolean;
+        };
+        notifications: { inAppEnabled: boolean };
+      };
     };
 
     expect(statusResponse.status).toBe(200);
     expect(statusBody.ok).toBe(true);
-    expect(statusBody.data.storage.schemaVersion).toBe("0002_integrations");
+    expect(statusBody.data.storage.schemaVersion).toBe("0003_scheduler_queue");
+    expect(statusBody.data.scheduler.queuedItems).toBe(1);
+    expect(statusBody.data.scheduler.totalRuns).toBe(1);
+    expect(statusBody.data.safety.allowAutoCommit).toBe(true);
+    expect(statusBody.data.safety.allowAutoPush).toBe(true);
+    expect(statusBody.data.safety.allowAutoApprove).toBe(false);
+    expect(statusBody.data.safety.allowRiskyFixes).toBe(false);
+    expect(statusBody.data.notifications.inAppEnabled).toBe(true);
 
     const configResponse = await api.handle(
       new Request("http://localhost/api/v1/config"),

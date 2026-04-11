@@ -183,6 +183,33 @@ function parseCliArgs(argv: string[]): ParsedCliArgs {
         index = nextIndex;
         break;
       }
+      case matchesFlag(arg, "--allow-auto-commit"): {
+        const [value, nextIndex] = takeValue(index, "--allow-auto-commit");
+        overrides.defaults = {
+          ...(overrides.defaults as object),
+          allowAutoCommit: parseBoolean(value),
+        };
+        index = nextIndex;
+        break;
+      }
+      case matchesFlag(arg, "--allow-auto-push"): {
+        const [value, nextIndex] = takeValue(index, "--allow-auto-push");
+        overrides.defaults = {
+          ...(overrides.defaults as object),
+          allowAutoPush: parseBoolean(value),
+        };
+        index = nextIndex;
+        break;
+      }
+      case matchesFlag(arg, "--allow-auto-approve"): {
+        const [value, nextIndex] = takeValue(index, "--allow-auto-approve");
+        overrides.defaults = {
+          ...(overrides.defaults as object),
+          allowAutoApprove: parseBoolean(value),
+        };
+        index = nextIndex;
+        break;
+      }
       case matchesFlag(arg, "--osascript-path"): {
         const [value, nextIndex] = takeValue(index, "--osascript-path");
         overrides.tools = {
@@ -217,9 +244,15 @@ function buildEnvOverrides(
       dbPath: env.LOOPER_DB_PATH,
     },
     notifications: {
+      inApp: parseBoolean(env.LOOPER_IN_APP_NOTIFICATIONS),
       osascript: {
         enabled: parseBoolean(env.LOOPER_OSASCRIPT_ENABLED),
       },
+    },
+    defaults: {
+      allowAutoCommit: parseBoolean(env.LOOPER_ALLOW_AUTO_COMMIT),
+      allowAutoPush: parseBoolean(env.LOOPER_ALLOW_AUTO_PUSH),
+      allowAutoApprove: parseBoolean(env.LOOPER_ALLOW_AUTO_APPROVE),
     },
     tools: {
       bunPath: env.LOOPER_BUN_PATH,

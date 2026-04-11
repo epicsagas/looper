@@ -83,6 +83,9 @@ export interface FixerLoopRunnerOptions {
     cwd: string;
     commands: string[];
   }) => Promise<FixerValidationResult>;
+  allowAutoCommit?: boolean;
+  allowAutoPush?: boolean;
+  allowRiskyFixes?: boolean;
 }
 
 export interface FixerDiscoveryResult {
@@ -157,12 +160,18 @@ export class FixerLoopRunner {
   private readonly agentTimeoutMs: number;
   private readonly claimTtlMs: number;
   private readonly validationCommands: string[];
+  private readonly allowAutoCommit: boolean;
+  private readonly allowAutoPush: boolean;
+  private readonly allowRiskyFixes: boolean;
 
   constructor(private readonly options: FixerLoopRunnerOptions) {
     this.now = options.now ?? (() => new Date());
     this.agentTimeoutMs = options.agentTimeoutMs ?? 30 * 60_000;
     this.claimTtlMs = options.claimTtlMs ?? 5 * 60_000;
     this.validationCommands = options.validationCommands ?? [];
+    this.allowAutoCommit = options.allowAutoCommit ?? true;
+    this.allowAutoPush = options.allowAutoPush ?? true;
+    this.allowRiskyFixes = options.allowRiskyFixes ?? false;
   }
 
   public async discoverPullRequests(input: {
@@ -268,12 +277,46 @@ export class FixerLoopRunner {
       lastRunAt: run.startedAt,
       nextRunAt: null,
     });
+    this.appendEvent({
+      eventType: "loop.started",
+      projectId: project.id,
+      loopId: loop.id,
+      runId: run.id,
+      entityType: "loop",
+      entityId: loop.id,
+      payload: {
+        queueItemId: queueItem.id,
+        resumed: resumedRun.resumed,
+        startStep: resumedRun.startStep,
+      },
+    });
+    this.appendEvent({
+      eventType: "run.started",
+      projectId: project.id,
+      loopId: loop.id,
+      runId: run.id,
+      entityType: "run",
+      entityId: run.id,
+      payload: {
+        queueItemId: queueItem.id,
+        currentStep: resumedRun.startStep,
+      },
+    });
 
     try {
       for (const step of FIXER_STEP_SEQUENCE.slice(
         FIXER_STEP_SEQUENCE.indexOf(resumedRun.startStep),
       )) {
         run = this.persistStepStarted(run, step, checkpoint);
+        this.appendEvent({
+          eventType: "loop.step.started",
+          projectId: project.id,
+          loopId: loop.id,
+          runId: run.id,
+          entityType: "run",
+          entityId: run.id,
+          payload: { step },
+        });
         checkpoint = await this.executeStep({
           step,
           checkpoint,
@@ -288,6 +331,15 @@ export class FixerLoopRunner {
         }
 
         run = this.persistStepCompleted(run, step, checkpoint);
+        this.appendEvent({
+          eventType: "loop.step.completed",
+          projectId: project.id,
+          loopId: loop.id,
+          runId: run.id,
+          entityType: "run",
+          entityId: run.id,
+          payload: { step },
+        });
         if (checkpoint.skipReason) {
           break;
         }
@@ -300,6 +352,15 @@ export class FixerLoopRunner {
         status: "success",
         summary,
         checkpoint,
+      });
+      this.appendEvent({
+        eventType: "run.completed",
+        projectId: project.id,
+        loopId: loop.id,
+        runId: run.id,
+        entityType: "run",
+        entityId: run.id,
+        payload: { summary },
       });
       this.options.scheduler.complete(queueItem.id);
       this.updateLoop(loop, {
@@ -317,6 +378,19 @@ export class FixerLoopRunner {
       };
     } catch (error) {
       const failure = this.classifyFailure(error);
+      this.appendEvent({
+        eventType: "loop.step.failed",
+        projectId: project.id,
+        loopId: loop.id,
+        runId: run.id,
+        entityType: "run",
+        entityId: run.id,
+        payload: {
+          message: failure.message,
+          failureKind: failure.kind,
+          currentStep: run.currentStep,
+        },
+      });
       this.finalizeRun(run, {
         status: "failed",
         summary: failure.message,
@@ -330,6 +404,18 @@ export class FixerLoopRunner {
                 : (checkpoint.resumePolicy ?? "replay_step"),
         },
         errorMessage: failure.message,
+      });
+      this.appendEvent({
+        eventType: "run.failed",
+        projectId: project.id,
+        loopId: loop.id,
+        runId: run.id,
+        entityType: "run",
+        entityId: run.id,
+        payload: {
+          summary: failure.message,
+          failureKind: failure.kind,
+        },
       });
 
       const failedQueueItem = this.options.scheduler.fail(
@@ -514,6 +600,25 @@ export class FixerLoopRunner {
       );
     }
 
+    if (
+      !this.allowRiskyFixes &&
+      fixItems.some((item) => item.type === "conflict")
+    ) {
+      return {
+        ...input.checkpoint,
+        skipReason: `Skipped ${input.queueItem.repo}#${input.queueItem.prNumber} because risky conflict fixes require manual intervention`,
+        resumePolicy: "manual_intervention",
+      };
+    }
+
+    if (!this.allowAutoCommit) {
+      return {
+        ...input.checkpoint,
+        skipReason: `Auto commit disabled; manual fixer execution required for ${input.queueItem.repo}#${input.queueItem.prNumber}`,
+        resumePolicy: "manual_intervention",
+      };
+    }
+
     const detail = input.checkpoint.detail;
     const prompt = buildFixerPrompt({
       repo: requireString(input.queueItem.repo, "queueItem.repo"),
@@ -602,6 +707,14 @@ export class FixerLoopRunner {
       );
     }
 
+    if (!this.allowAutoPush) {
+      return {
+        ...input.checkpoint,
+        skipReason: `Auto push disabled; manual fix push required for branch ${branch}`,
+        resumePolicy: "manual_intervention",
+      };
+    }
+
     try {
       await this.options.git.push({
         worktreePath: input.project.repoPath,
@@ -623,6 +736,21 @@ export class FixerLoopRunner {
         lastFixItemsHash: input.checkpoint.fixItemsHash ?? null,
         lastFixPushedAt: pushedAt,
       }),
+    });
+    this.appendEvent({
+      eventType: "pr.branch.pushed",
+      projectId: input.project.id,
+      loopId: input.loop.id,
+      entityType: "pull_request",
+      entityId: buildPullRequestTargetId(
+        requireString(input.queueItem.repo, "queueItem.repo"),
+        requireNumber(input.queueItem.prNumber, "queueItem.prNumber"),
+      ),
+      payload: {
+        branch,
+        pushedAt,
+        headSha: input.checkpoint.detail?.headSha ?? null,
+      },
     });
 
     return {
@@ -931,6 +1059,41 @@ export class FixerLoopRunner {
 
   private nowIso(): string {
     return this.now().toISOString();
+  }
+
+  private appendEvent(input: {
+    eventType:
+      | "loop.started"
+      | "run.started"
+      | "loop.step.started"
+      | "loop.step.completed"
+      | "loop.step.failed"
+      | "run.completed"
+      | "run.failed"
+      | "pr.branch.pushed";
+    projectId: string;
+    loopId?: string;
+    runId?: string;
+    entityType: "loop" | "run" | "pull_request";
+    entityId: string;
+    payload?: Record<string, unknown>;
+  }): void {
+    this.options.store.events.append({
+      id: randomUUID(),
+      eventType: input.eventType,
+      projectId: input.projectId,
+      loopId: input.loopId ?? null,
+      runId: input.runId ?? null,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      correlationId: null,
+      causationId: null,
+      actorType: "system",
+      actorId: "looperd",
+      actorDisplayName: "looperd",
+      payloadJson: JSON.stringify(input.payload ?? {}),
+      createdAt: this.nowIso(),
+    });
   }
 }
 

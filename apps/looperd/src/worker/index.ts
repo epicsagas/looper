@@ -89,6 +89,8 @@ export interface WorkerLoopRunnerOptions {
     commands: string[];
   }) => Promise<WorkerValidationResult>;
   openPrStrategy?: OpenPrStrategy;
+  allowAutoCommit?: boolean;
+  allowAutoPush?: boolean;
 }
 
 export interface WorkerProcessResult {
@@ -164,6 +166,8 @@ export class WorkerLoopRunner {
   private readonly claimTtlMs: number;
   private readonly validationCommands: string[];
   private readonly openPrStrategy: OpenPrStrategy;
+  private readonly allowAutoCommit: boolean;
+  private readonly allowAutoPush: boolean;
 
   constructor(private readonly options: WorkerLoopRunnerOptions) {
     this.now = options.now ?? (() => new Date());
@@ -171,6 +175,8 @@ export class WorkerLoopRunner {
     this.claimTtlMs = options.claimTtlMs ?? 10 * 60_000;
     this.validationCommands = options.validationCommands ?? [];
     this.openPrStrategy = options.openPrStrategy ?? "all_done";
+    this.allowAutoCommit = options.allowAutoCommit ?? true;
+    this.allowAutoPush = options.allowAutoPush ?? true;
   }
 
   public async processNext(
@@ -305,6 +311,15 @@ export class WorkerLoopRunner {
         summary,
         checkpoint,
       });
+      this.appendEvent({
+        eventType: "run.completed",
+        projectId: project.id,
+        loopId: loop.id,
+        runId: run.id,
+        entityType: "run",
+        entityId: run.id,
+        payload: { summary },
+      });
       this.options.scheduler.complete(queueItem.id);
 
       const requeuedItem = this.handlePostRunSuccess({
@@ -351,6 +366,18 @@ export class WorkerLoopRunner {
                 : (checkpoint.resumePolicy ?? "replay_step"),
         },
         errorMessage: failure.message,
+      });
+      this.appendEvent({
+        eventType: "run.failed",
+        projectId: project.id,
+        loopId: loop.id,
+        runId: run.id,
+        entityType: "run",
+        entityId: run.id,
+        payload: {
+          summary: failure.message,
+          failureKind: failure.kind,
+        },
       });
 
       const failedQueueItem = this.options.scheduler.fail(
@@ -581,6 +608,14 @@ export class WorkerLoopRunner {
       return input.checkpoint;
     }
 
+    if (!this.allowAutoCommit) {
+      return {
+        ...input.checkpoint,
+        skipReason: `Auto commit disabled; manual execution required for task ${input.task.id}`,
+        resumePolicy: "manual_intervention",
+      };
+    }
+
     const taskInfo = requireTaskInfo(input.checkpoint);
     const worktree = requireWorktree(input.checkpoint);
     const prompt = await buildWorkerPrompt({
@@ -723,6 +758,14 @@ export class WorkerLoopRunner {
 
     if (!shouldOpen) {
       return input.checkpoint;
+    }
+
+    if (!this.allowAutoPush) {
+      return {
+        ...input.checkpoint,
+        skipReason: `Auto push disabled; manual PR opening required for task ${input.task.id}`,
+        resumePolicy: "manual_intervention",
+      };
     }
 
     try {

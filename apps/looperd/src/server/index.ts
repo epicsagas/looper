@@ -254,6 +254,7 @@ function buildHealthResponse(context: LooperdApiContext) {
 function buildStatusResponse(context: LooperdApiContext) {
   const loops = context.store.loops.list();
   const runs = context.store.runs.list();
+  const queueItems = context.store.queue.list();
   const storage = context.store.schema.healthcheck();
 
   return {
@@ -275,15 +276,29 @@ function buildStatusResponse(context: LooperdApiContext) {
     },
     scheduler: {
       healthy: true,
-      queuedItems: runs.filter((run) => run.status === "queued").length,
-      runningItems: runs.filter((run) => run.status === "running").length,
+      queuedItems: queueItems.filter((item) => item.status === "queued").length,
+      runningItems: queueItems.filter((item) => item.status === "running")
+        .length,
+      completedItems: queueItems.filter((item) => item.status === "completed")
+        .length,
+      failedItems: queueItems.filter((item) => item.status === "failed").length,
+      totalRuns: runs.length,
+      activeRuns: runs.filter((run) => run.status === "running").length,
     },
     loops: {
       reviewer: summarizeLoopType(loops, "reviewer"),
       worker: summarizeLoopType(loops, "worker"),
       fixer: summarizeLoopType(loops, "fixer"),
     },
+    safety: {
+      allowAutoCommit: context.config.defaults.allowAutoCommit,
+      allowAutoPush: context.config.defaults.allowAutoPush,
+      allowAutoApprove: context.config.defaults.allowAutoApprove,
+      allowRiskyFixes: context.config.defaults.allowRiskyFixes,
+      openPrStrategy: context.config.defaults.openPrStrategy ?? "manual",
+    },
     notifications: {
+      inAppEnabled: context.config.notifications.inApp,
       osascriptEnabled: context.config.notifications.osascript.enabled,
     },
     tools: {

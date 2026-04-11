@@ -67,6 +67,7 @@ export interface ReviewerLoopRunnerOptions {
   now?: () => Date;
   agentTimeoutMs?: number;
   claimTtlMs?: number;
+  allowAutoApprove?: boolean;
 }
 
 export interface ReviewerDiscoveryResult {
@@ -140,11 +141,13 @@ export class ReviewerLoopRunner {
   private readonly now: () => Date;
   private readonly agentTimeoutMs: number;
   private readonly claimTtlMs: number;
+  private readonly allowAutoApprove: boolean;
 
   constructor(private readonly options: ReviewerLoopRunnerOptions) {
     this.now = options.now ?? (() => new Date());
     this.agentTimeoutMs = options.agentTimeoutMs ?? 15 * 60_000;
     this.claimTtlMs = options.claimTtlMs ?? 5 * 60_000;
+    this.allowAutoApprove = options.allowAutoApprove ?? false;
   }
 
   public async discoverPullRequests(input: {
@@ -313,6 +316,15 @@ export class ReviewerLoopRunner {
         summary,
         checkpoint,
       });
+      this.appendEvent({
+        eventType: "run.completed",
+        projectId: project.id,
+        loopId: loop.id,
+        runId: run.id,
+        entityType: "run",
+        entityId: run.id,
+        payload: { summary },
+      });
       this.options.scheduler.complete(queueItem.id);
       this.updateLoop(loop, {
         status: "completed",
@@ -355,6 +367,18 @@ export class ReviewerLoopRunner {
                 : (checkpoint.resumePolicy ?? "replay_step"),
         },
         errorMessage: failure.message,
+      });
+      this.appendEvent({
+        eventType: "run.failed",
+        projectId: project.id,
+        loopId: loop.id,
+        runId: run.id,
+        entityType: "run",
+        entityId: run.id,
+        payload: {
+          summary: failure.message,
+          failureKind: failure.kind,
+        },
       });
 
       const failedQueueItem = this.options.scheduler.fail(
@@ -657,6 +681,11 @@ export class ReviewerLoopRunner {
       };
     }
 
+    const reviewEvent =
+      pendingReview.event === "APPROVE" && !this.allowAutoApprove
+        ? "COMMENT"
+        : pendingReview.event;
+
     try {
       const repo = requireString(input.queueItem.repo, "queueItem.repo");
       const prNumber = requireNumber(
@@ -666,7 +695,7 @@ export class ReviewerLoopRunner {
       await this.options.github.submitReview({
         repo,
         prNumber,
-        event: pendingReview.event,
+        event: reviewEvent,
         body: pendingReview.body,
         cwd: input.project.repoPath,
       });
@@ -685,7 +714,7 @@ export class ReviewerLoopRunner {
       metadataJson: JSON.stringify({
         ...loopMetadata,
         lastPublishedHeadSha: pendingReview.headSha,
-        lastReviewEvent: pendingReview.event,
+        lastReviewEvent: reviewEvent,
         lastReviewSummary: pendingReview.summary ?? null,
         lastPublishedAt: this.nowIso(),
       }),
@@ -703,7 +732,7 @@ export class ReviewerLoopRunner {
       payload: {
         repo: input.queueItem.repo,
         prNumber: input.queueItem.prNumber,
-        event: pendingReview.event,
+        event: reviewEvent,
         headSha: pendingReview.headSha,
       },
     });
