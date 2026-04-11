@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import type { Store } from "../storage/store";
 import type { WorktreeRecord } from "../storage/types";
@@ -95,6 +95,7 @@ export class GitWorktreeGateway {
       projectId: input.projectId,
       repoPath: input.repoPath,
       branch: input.branch,
+      worktreeRoot: input.worktreeRoot,
     });
 
     if (existing) {
@@ -163,13 +164,34 @@ export class GitWorktreeGateway {
     projectId: string;
     repoPath: string;
     branch: string;
+    worktreeRoot?: string;
   }): Promise<WorktreeRecord | null> {
     const worktrees = await this.listWorktrees(input.repoPath);
-    const match = worktrees.find(
-      (worktree) => worktree.branch === input.branch,
-    );
+    const match = worktrees.find((worktree) => {
+      if (worktree.branch !== input.branch) {
+        return false;
+      }
+      if (
+        normalizeComparablePath(worktree.path) ===
+        normalizeComparablePath(input.repoPath)
+      ) {
+        return false;
+      }
+      if (
+        input.worktreeRoot &&
+        !isWithinRoot(worktree.path, input.worktreeRoot)
+      ) {
+        return false;
+      }
+      return true;
+    });
 
     if (!match) {
+      return null;
+    }
+
+    if (!(await this.isHealthyWorktree(match.path))) {
+      await this.tryRemoveWorktree(input.repoPath, match.path);
       return null;
     }
 
@@ -242,18 +264,48 @@ export class GitWorktreeGateway {
     this.assertWritableBranch(input.branch, input.protectedBranches ?? []);
     const remote = input.remote ?? "origin";
     if (input.expectedRemoteHeadSha) {
-      const actualHeadSha = await this.getRemoteHeadSha({
-        repoPath: input.worktreePath,
-        remote,
-        branch: input.branch,
-      });
-      if (actualHeadSha !== input.expectedRemoteHeadSha) {
-        throw new RemoteHeadChangedError(
-          input.branch,
-          input.expectedRemoteHeadSha,
-          actualHeadSha,
+      const isExpectedAncestor = await this.isAncestor(
+        input.worktreePath,
+        input.expectedRemoteHeadSha,
+      );
+      if (!isExpectedAncestor) {
+        throw new Error(
+          `Refusing fixer push for ${input.branch} because local HEAD no longer descends from ${input.expectedRemoteHeadSha}`,
         );
       }
+      try {
+        await this.runGit(
+          [
+            "push",
+            "--porcelain",
+            `--force-with-lease=refs/heads/${input.branch}:${input.expectedRemoteHeadSha}`,
+            "-u",
+            remote,
+            `HEAD:refs/heads/${input.branch}`,
+          ],
+          input.worktreePath,
+        );
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          /stale info|non-fast-forward|failed to push|rejected/i.test(
+            error.message,
+          )
+        ) {
+          const actualHeadSha = await this.getRemoteHeadSha({
+            repoPath: input.worktreePath,
+            remote,
+            branch: input.branch,
+          });
+          throw new RemoteHeadChangedError(
+            input.branch,
+            input.expectedRemoteHeadSha,
+            actualHeadSha,
+          );
+        }
+        throw error;
+      }
+      return;
     }
     await this.runGit(["push", "-u", remote, input.branch], input.worktreePath);
   }
@@ -357,6 +409,48 @@ export class GitWorktreeGateway {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  private async isAncestor(
+    repoPath: string,
+    ancestor: string,
+    descendant = "HEAD",
+  ): Promise<boolean> {
+    try {
+      await this.runGit(
+        ["merge-base", "--is-ancestor", ancestor, descendant],
+        repoPath,
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async isHealthyWorktree(worktreePath: string): Promise<boolean> {
+    try {
+      await this.runGit(
+        ["status", "--porcelain", "--untracked-files=all"],
+        worktreePath,
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async tryRemoveWorktree(
+    repoPath: string,
+    worktreePath: string,
+  ): Promise<void> {
+    try {
+      await this.runGit(
+        ["worktree", "remove", "--force", worktreePath],
+        repoPath,
+      );
+    } catch {
+      // ignore and let caller recreate/fail deterministically later
     }
   }
 
@@ -473,6 +567,18 @@ function parseGitHubRepoFromRemoteUrl(remoteUrl: string): string | null {
 
 function sanitizeBranchName(branch: string): string {
   return branch.replace(/[^a-zA-Z0-9._-]+/g, "-");
+}
+
+function isWithinRoot(path: string, root: string): boolean {
+  const resolvedPath = normalizeComparablePath(path);
+  const resolvedRoot = normalizeComparablePath(root);
+  return (
+    resolvedPath === resolvedRoot || resolvedPath.startsWith(`${resolvedRoot}/`)
+  );
+}
+
+function normalizeComparablePath(path: string): string {
+  return resolve(path).replace(/^\/private/, "");
 }
 
 function parseWorktreeList(output: string): Array<{

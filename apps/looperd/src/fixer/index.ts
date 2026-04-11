@@ -756,6 +756,21 @@ export class FixerLoopRunner {
     const worktreeRoot =
       readString(projectMetadata.worktreeRoot) ??
       join(input.project.repoPath, ".looper-worktrees");
+    if (shouldRebuildWorktree(input.checkpoint)) {
+      const previousWorktree = input.checkpoint.worktree;
+      if (previousWorktree?.path && previousWorktree.branch) {
+        await this.options.git.cleanupWorktree({
+          projectId: input.project.id,
+          repoPath: input.project.repoPath,
+          worktreePath: previousWorktree.path,
+          branch: previousWorktree.branch,
+          protectedBranches: compactStrings([
+            detail?.baseRefName,
+            input.project.baseBranch,
+          ]),
+        });
+      }
+    }
     const worktree = await this.options.git.createWorktree({
       projectId: input.project.id,
       repoPath: input.project.repoPath,
@@ -1180,6 +1195,26 @@ export class FixerLoopRunner {
       );
     }
 
+    const finalHeadSha = input.checkpoint.reconcileCommits?.finalHeadSha;
+    const currentPr = await this.options.github.viewPullRequest({
+      repo: requireString(input.queueItem.repo, "queueItem.repo"),
+      prNumber: requireNumber(input.queueItem.prNumber, "queueItem.prNumber"),
+      cwd: requireString(
+        requireWorktree(input.checkpoint).path,
+        "worktree.path",
+      ),
+    });
+    if (
+      finalHeadSha &&
+      currentPr.headSha &&
+      currentPr.headSha !== finalHeadSha
+    ) {
+      throw new FixerLoopError(
+        `PR head changed before resolving comments: expected ${finalHeadSha}, got ${currentPr.headSha}`,
+        "retryable_after_resume",
+      );
+    }
+
     const repo = requireString(input.queueItem.repo, "queueItem.repo");
     const worktreePath = requireString(
       requireWorktree(input.checkpoint).path,
@@ -1301,11 +1336,24 @@ export class FixerLoopRunner {
     const nowIso = this.nowIso();
     const checkpoint = parseCheckpoint(latestRun?.checkpointJson);
     const lastCompletedStep = asFixerStep(latestRun?.lastCompletedStep);
-    const startStep =
+    const failedStep = asFixerStep(latestRun?.currentStep);
+    const resumeFromPrepare = shouldResumeFromPrepare({
+      latestRunStatus: latestRun?.status,
+      failedStep,
+      checkpoint,
+    });
+    const resumedCheckpoint = resumeFromPrepare
+      ? rewindCheckpointForPrepareRetry(checkpoint)
+      : checkpoint;
+    const startStep: FixerStep =
       latestRun &&
       (latestRun.status === "failed" || latestRun.status === "interrupted") &&
-      lastCompletedStep
-        ? (nextFixerStep(lastCompletedStep) ?? "discover-pr")
+      (resumeFromPrepare || lastCompletedStep)
+        ? resumeFromPrepare
+          ? "prepare-worktree"
+          : (nextFixerStep(
+              requireFixerStep(lastCompletedStep, "lastCompletedStep"),
+            ) ?? "discover-pr")
         : "discover-pr";
     const resumed =
       Boolean(latestRun) &&
@@ -1317,10 +1365,14 @@ export class FixerLoopRunner {
       loopId: loop.id,
       status: "running",
       currentStep: startStep,
-      lastCompletedStep: resumed ? (lastCompletedStep ?? null) : null,
+      lastCompletedStep: resumed
+        ? resumeFromPrepare
+          ? (previousFixerStep(startStep) ?? null)
+          : (lastCompletedStep ?? null)
+        : null,
       checkpointJson: JSON.stringify(
         resumed
-          ? { ...checkpoint, resumePolicy: "advance_from_checkpoint" }
+          ? { ...resumedCheckpoint, resumePolicy: "advance_from_checkpoint" }
           : { resumePolicy: "replay_step" },
       ),
       summary: null,
@@ -1803,6 +1855,11 @@ function nextFixerStep(step: FixerStep): FixerStep | null {
   return FIXER_STEP_SEQUENCE[index + 1] ?? null;
 }
 
+function previousFixerStep(step: FixerStep): FixerStep | null {
+  const index = FIXER_STEP_SEQUENCE.indexOf(step);
+  return index > 0 ? (FIXER_STEP_SEQUENCE[index - 1] ?? null) : null;
+}
+
 function asFixerStep(value: string | null | undefined): FixerStep | null {
   return FIXER_STEP_SEQUENCE.includes(value as FixerStep)
     ? (value as FixerStep)
@@ -1914,6 +1971,64 @@ function buildFixerCommitMessage(prNumber: number): string {
 
 function compactStrings(values: Array<string | null | undefined>): string[] {
   return values.filter((value): value is string => Boolean(value));
+}
+
+function requireFixerStep(
+  value: FixerStep | null | undefined,
+  fieldName: string,
+): FixerStep {
+  if (!value) {
+    throw new Error(`${fieldName} is required`);
+  }
+  return value;
+}
+
+function shouldResumeFromPrepare(input: {
+  latestRunStatus?: string | null;
+  failedStep: FixerStep | null;
+  checkpoint: FixerCheckpoint;
+}): boolean {
+  if (
+    input.latestRunStatus !== "failed" &&
+    input.latestRunStatus !== "interrupted"
+  ) {
+    return false;
+  }
+  if (!input.checkpoint.worktree?.preparedAt) {
+    return false;
+  }
+
+  return ["repair", "reconcile-commits", "validate", "push"].includes(
+    input.failedStep ?? "discover-pr",
+  );
+}
+
+function shouldRebuildWorktree(checkpoint: FixerCheckpoint): boolean {
+  return Boolean(checkpoint.worktree?.path && !checkpoint.worktree?.preparedAt);
+}
+
+function rewindCheckpointForPrepareRetry(
+  checkpoint: FixerCheckpoint,
+): FixerCheckpoint {
+  return {
+    ...checkpoint,
+    skipReason: undefined,
+    worktree: checkpoint.worktree
+      ? {
+          ...checkpoint.worktree,
+          headSha: undefined,
+          baseHeadSha: undefined,
+          preparedAt: undefined,
+          cleanedAt: undefined,
+        }
+      : undefined,
+    repair: undefined,
+    reconcileCommits: undefined,
+    validation: undefined,
+    push: undefined,
+    resolvedComments: undefined,
+    recheck: undefined,
+  };
 }
 
 function upsertResolvedComment(
