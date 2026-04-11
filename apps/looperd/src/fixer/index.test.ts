@@ -379,6 +379,7 @@ describe("FixerLoopRunner", () => {
         },
         { comments: [], checks: [], headSha: "commit-1" },
         { comments: [], checks: [], headSha: "commit-1" },
+        { comments: [], checks: [], headSha: "commit-1" },
       ],
     });
     const git = new FakeGitGateway();
@@ -479,6 +480,8 @@ describe("FixerLoopRunner", () => {
         },
         { comments: [], checks: [], headSha: "commit-1" },
         { comments: [], checks: [], headSha: "commit-1" },
+        { comments: [], checks: [], headSha: "commit-1" },
+        { comments: [], checks: [], headSha: "commit-1" },
       ],
     });
     const git = new FakeGitGateway();
@@ -567,6 +570,7 @@ describe("FixerLoopRunner", () => {
         },
         { comments: [], checks: [], headSha: "commit-1" },
         "error",
+        { comments: [], checks: [], headSha: "commit-1" },
         { comments: [], checks: [], headSha: "commit-1" },
       ],
     });
@@ -883,6 +887,7 @@ describe("FixerLoopRunner", () => {
         },
         { comments: [], checks: [], headSha: "looperd-commit-2" },
         { comments: [], checks: [], headSha: "looperd-commit-2" },
+        { comments: [], checks: [], headSha: "looperd-commit-2" },
       ],
     });
     const git = new FakeGitGateway({
@@ -1156,6 +1161,11 @@ describe("FixerLoopRunner", () => {
           checks: [],
           headSha: "commit-1",
         },
+        {
+          comments: [],
+          checks: [],
+          headSha: "commit-1",
+        },
       ],
     });
     const git = new FakeGitGateway({
@@ -1254,6 +1264,7 @@ describe("FixerLoopRunner", () => {
           checks: [],
           headSha: "abc123",
         },
+        { comments: [], checks: [], headSha: "abc123" },
         { comments: [], checks: [], headSha: "abc123" },
         { comments: [], checks: [], headSha: "abc123" },
         { comments: [], checks: [], headSha: "abc123" },
