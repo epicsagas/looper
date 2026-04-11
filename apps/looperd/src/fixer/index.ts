@@ -1519,7 +1519,12 @@ export class FixerLoopRunner {
     if (existing) {
       const updated = {
         ...existing,
-        status: existing.status === "running" ? existing.status : "queued",
+        status:
+          existing.status === "paused"
+            ? existing.status
+            : existing.status === "running"
+              ? existing.status
+              : "queued",
         nextRunAt: nowIso,
         updatedAt: nowIso,
       };

@@ -533,6 +533,56 @@ describe("FixerLoopRunner", () => {
     fixture.store.close();
   });
 
+  test("auto-discovery preserves paused fixer loops", async () => {
+    const fixture = await createFixture();
+    const github = new FakeGitHubGateway({
+      views: [{ comments: [{ id: "comment-1", threadId: "thread-1" }] }],
+    });
+    const git = new FakeGitGateway();
+    const agent = new FakeAgentExecutor([completedAgentResult("fixed")]);
+    const runner = new FixerLoopRunner({
+      store: fixture.store,
+      scheduler: fixture.queue,
+      github,
+      git,
+      agentExecutor: agent,
+      logger: createCapturingLogger().logger,
+      now: () => fixture.now,
+      validationRunner: async (): Promise<FixerValidationResult> => ({
+        passed: true,
+        summary: "ok",
+      }),
+    });
+    const nowIso = fixture.now.toISOString();
+
+    fixture.store.loops.upsert({
+      id: "loop_paused",
+      projectId: "project_1",
+      type: "fixer",
+      targetType: "pull_request",
+      targetId: "pr:acme/looper:42",
+      repo: "acme/looper",
+      prNumber: 42,
+      status: "paused",
+      configJson: null,
+      metadataJson: null,
+      lastRunAt: null,
+      nextRunAt: nowIso,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+
+    const discovery = await runner.discoverPullRequests({
+      projectId: "project_1",
+      repo: "acme/looper",
+    });
+
+    expect(discovery.createdLoopIds).toHaveLength(0);
+    expect(fixture.store.loops.getById("loop_paused")?.status).toBe("paused");
+
+    fixture.store.close();
+  });
+
   test("retries from recheck without rerunning repair after recheck failure", async () => {
     const fixture = await createFixture();
     const github = new FakeGitHubGateway({
