@@ -510,6 +510,7 @@ class BasicLooperdRuntime implements LooperdRuntime {
           pid: execution.pid,
           error: error instanceof Error ? error.message : String(error),
         });
+        return false;
       }
     }
 

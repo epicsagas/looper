@@ -101,6 +101,17 @@ export class SchedulerQueue {
     );
   }
 
+  public claimNextOfType(
+    claimedBy: string,
+    type: QueueLoopType,
+  ): QueueItemRecord | null {
+    return this.options.store.queue.claimNextOfType(
+      this.now().toISOString(),
+      claimedBy,
+      type,
+    );
+  }
+
   public complete(itemId: string): void {
     this.options.store.queue.complete(itemId, this.now().toISOString());
   }

@@ -287,6 +287,59 @@ function createCapturingLogger() {
 }
 
 describe("FixerLoopRunner", () => {
+  test("processNext does not claim queue items for other loop types", async () => {
+    const fixture = await createFixture();
+    const nowIso = fixture.now.toISOString();
+    fixture.store.loops.upsert({
+      id: "loop_worker_1",
+      projectId: "project_1",
+      type: "worker",
+      targetType: "task",
+      targetId: "task:task_1",
+      repo: "acme/looper",
+      prNumber: null,
+      status: "queued",
+      configJson: null,
+      metadataJson: null,
+      lastRunAt: null,
+      nextRunAt: nowIso,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    fixture.queue.enqueue({
+      projectId: "project_1",
+      loopId: "loop_worker_1",
+      type: "worker",
+      targetType: "task",
+      targetId: "task:task_1",
+      repo: "acme/looper",
+      dedupeKey: "worker:task_1",
+    });
+
+    const runner = new FixerLoopRunner({
+      store: fixture.store,
+      scheduler: fixture.queue,
+      github: new FakeGitHubGateway({ views: [] }),
+      git: new FakeGitGateway(),
+      agentExecutor: new FakeAgentExecutor([]),
+      logger: createCapturingLogger().logger,
+      now: () => fixture.now,
+      validationRunner: async (): Promise<FixerValidationResult> => ({
+        passed: true,
+        summary: "ok",
+      }),
+    });
+
+    const result = await runner.processNext("fixer-1");
+
+    expect(result).toBeNull();
+    expect(
+      fixture.store.queue.findActiveByDedupe("worker:task_1")?.status,
+    ).toBe("queued");
+
+    fixture.store.close();
+  });
+
   test("discovers and completes a full successful fixer flow", async () => {
     const fixture = await createFixture();
     const github = new FakeGitHubGateway({

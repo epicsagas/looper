@@ -258,6 +258,64 @@ function createCapturingLogger() {
 }
 
 describe("WorkerLoopRunner", () => {
+  test("processNext does not claim queue items for other loop types", async () => {
+    const fixture = await createFixture();
+    const nowIso = fixture.now.toISOString();
+    fixture.store.loops.upsert({
+      id: "loop_reviewer_1",
+      projectId: "project_1",
+      type: "reviewer",
+      targetType: "pull_request",
+      targetId: "pr:acme/looper:42",
+      repo: "acme/looper",
+      prNumber: 42,
+      status: "queued",
+      configJson: null,
+      metadataJson: null,
+      lastRunAt: null,
+      nextRunAt: nowIso,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    fixture.queue.enqueue({
+      projectId: "project_1",
+      loopId: "loop_reviewer_1",
+      type: "reviewer",
+      targetType: "pull_request",
+      targetId: "pr:acme/looper:42",
+      repo: "acme/looper",
+      prNumber: 42,
+      dedupeKey: "reviewer:acme/looper:42",
+    });
+
+    const runner = new WorkerLoopRunner({
+      store: fixture.store,
+      scheduler: fixture.queue,
+      git: new FakeGitGateway(fixture.worktreeRoot),
+      github: new FakeGitHubGateway(),
+      agentExecutor: new FakeAgentExecutor([
+        completedAgentResult("Implemented slice", ["abc123"]),
+      ]),
+      logger: createCapturingLogger().logger,
+      now: () => fixture.now,
+      validationRunner: async (): Promise<WorkerValidationResult> => ({
+        passed: true,
+        summary: "ok",
+        output: "ok",
+      }),
+      openPrStrategy: "all_done",
+    });
+
+    const result = await runner.processNext("worker-1");
+
+    expect(result).not.toBeNull();
+    expect(
+      fixture.store.queue.findActiveByDedupe("reviewer:acme/looper:42")?.status,
+    ).toBe("queued");
+
+    fixture.store.close();
+  });
+
   test("opens a pull request after a successful worker run", async () => {
     const fixture = await createFixture();
     const git = new FakeGitGateway(fixture.worktreeRoot);

@@ -76,6 +76,11 @@ export interface Store {
     findActiveByDedupe(dedupeKey: string): QueueItemRecord | null;
     listScheduled(nowIso: string, limit?: number): QueueItemRecord[];
     claimNext(nowIso: string, claimedBy: string): QueueItemRecord | null;
+    claimNextOfType(
+      nowIso: string,
+      claimedBy: string,
+      type: QueueItemRecord["type"],
+    ): QueueItemRecord | null;
     complete(id: string, finishedAt: string): void;
     markRetry(input: {
       id: string;

@@ -185,8 +185,8 @@ export class WorkerLoopRunner {
   public async processNext(
     claimedBy: string,
   ): Promise<WorkerProcessResult | null> {
-    const item = this.options.scheduler.claimNext(claimedBy);
-    if (!item || item.type !== "worker") {
+    const item = this.options.scheduler.claimNextOfType(claimedBy, "worker");
+    if (!item) {
       return null;
     }
 

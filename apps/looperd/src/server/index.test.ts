@@ -468,6 +468,13 @@ describe("createLooperdApi", () => {
     };
     expect(startedTaskBody.data.status).toBe("in_progress");
     expect(startedTaskBody.data.loopId).toBeTruthy();
+    expect(store.queue.findActiveByDedupe(`worker:${createTaskBody.data.id}`))
+      .toMatchObject({
+        loopId: startedTaskBody.data.loopId,
+        taskId: createTaskBody.data.id,
+        type: "worker",
+        status: "queued",
+      });
 
     const pausedTaskResponse = await api.handle(
       new Request(

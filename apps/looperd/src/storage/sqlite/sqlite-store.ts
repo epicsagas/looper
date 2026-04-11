@@ -556,6 +556,42 @@ export class SqliteStore implements Store {
         return claimed ? mapQueueItem(claimed) : null;
       });
     },
+    claimNextOfType: (
+      nowIso: string,
+      claimedBy: string,
+      type: QueueItemRecord["type"],
+    ): QueueItemRecord | null => {
+      return this.coordinator.withTransaction(() => {
+        const row = this.coordinator.db
+          .query(`${SCHEDULED_QUEUE_BASE_QUERY} AND qi.type = ?2${SCHEDULED_QUEUE_ORDER_BY} LIMIT 1`)
+          .get(nowIso, type) as Record<string, unknown> | null;
+
+        if (!row) {
+          return null;
+        }
+
+        const result = this.coordinator.db
+          .query(
+            `UPDATE queue_items
+             SET status = 'running',
+                 claimed_by = ?2,
+                 claimed_at = ?3,
+                 started_at = COALESCE(started_at, ?3),
+                 updated_at = ?3
+             WHERE id = ?1 AND status = 'queued'`,
+          )
+          .run(String(row.id), claimedBy, nowIso);
+
+        if (result.changes === 0) {
+          return null;
+        }
+
+        const claimed = this.coordinator.db
+          .query("SELECT * FROM queue_items WHERE id = ?1")
+          .get(String(row.id)) as Record<string, unknown> | null;
+        return claimed ? mapQueueItem(claimed) : null;
+      });
+    },
     complete: (id: string, finishedAt: string): void => {
       this.coordinator.db
         .query(
@@ -1127,7 +1163,7 @@ function asBoolean(value: unknown): boolean {
   return value === 1 || value === true || value === "1";
 }
 
-const SCHEDULED_QUEUE_QUERY = `
+const SCHEDULED_QUEUE_BASE_QUERY = `
   SELECT qi.*
   FROM queue_items qi
   LEFT JOIN loops l ON l.id = qi.loop_id
@@ -1150,5 +1186,10 @@ const SCHEDULED_QUEUE_QUERY = `
           AND blocker.id != qi.id
       )
     )
+`;
+
+const SCHEDULED_QUEUE_ORDER_BY = `
   ORDER BY qi.priority ASC, qi.available_at ASC, qi.created_at ASC
 `;
+
+const SCHEDULED_QUEUE_QUERY = `${SCHEDULED_QUEUE_BASE_QUERY}${SCHEDULED_QUEUE_ORDER_BY}`;

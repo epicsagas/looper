@@ -230,8 +230,8 @@ export class ReviewerLoopRunner {
   public async processNext(
     claimedBy: string,
   ): Promise<ReviewerProcessResult | null> {
-    const item = this.options.scheduler.claimNext(claimedBy);
-    if (!item || item.type !== "reviewer") {
+    const item = this.options.scheduler.claimNextOfType(claimedBy, "reviewer");
+    if (!item) {
       return null;
     }
 

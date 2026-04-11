@@ -11,6 +11,7 @@ import {
   defineTaskLoopTarget,
 } from "../domain/index";
 import type { ProjectManager } from "../projects/index";
+import { SchedulerQueue } from "../scheduler/index";
 import type { Store } from "../storage/store";
 import type {
   EventLogRecord,
@@ -662,6 +663,21 @@ function startTask(context: LooperdApiContext, taskId: string) {
   };
 
   context.store.tasks.upsert(updatedTask);
+  new SchedulerQueue({
+    store: context.store,
+    retryMaxAttempts: context.config.scheduler.retryMaxAttempts,
+    retryBaseDelayMs: context.config.scheduler.retryBaseDelayMs,
+    now: () => new Date(now),
+  }).enqueue({
+    projectId: updatedTask.projectId,
+    loopId: loop.id,
+    taskId: updatedTask.id,
+    type: "worker",
+    targetType: "task",
+    targetId: `task:${updatedTask.id}`,
+    repo: updatedTask.repo,
+    dedupeKey: `worker:${updatedTask.id}`,
+  });
   return serializeTask(context, updatedTask);
 }
 

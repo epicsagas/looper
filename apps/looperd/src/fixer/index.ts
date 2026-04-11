@@ -333,8 +333,8 @@ export class FixerLoopRunner {
   public async processNext(
     claimedBy: string,
   ): Promise<FixerProcessResult | null> {
-    const item = this.options.scheduler.claimNext(claimedBy);
-    if (!item || item.type !== "fixer") {
+    const item = this.options.scheduler.claimNextOfType(claimedBy, "fixer");
+    if (!item) {
       return null;
     }
 

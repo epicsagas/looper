@@ -293,6 +293,86 @@ function failedAgentResult(summary: string): AgentResult {
 }
 
 describe("createLooperdRuntime", () => {
+  test("leaves orphan executions active when SIGTERM cannot be sent", async () => {
+    const fixture = await createFixture();
+    const store = new SqliteStore({
+      dbPath: fixture.config.storage.dbPath,
+      backupDir: fixture.config.storage.backupDir,
+    });
+    store.initialize({ autoMigrate: true });
+
+    const now = "2026-04-11T12:00:00.000Z";
+    store.projects.upsert({
+      id: "project_1",
+      name: "Looper",
+      repoPath: fixture.rootDir,
+      baseBranch: "main",
+      archived: false,
+      metadataJson: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    store.agentExecutions.upsert({
+      id: "agent_exec_1",
+      projectId: "project_1",
+      loopId: null,
+      runId: null,
+      taskId: null,
+      vendor: "opencode",
+      status: "running",
+      pid: 12345,
+      commandJson: JSON.stringify(["opencode", "run"]),
+      cwd: fixture.rootDir,
+      summary: null,
+      parseStatus: null,
+      completionSignal: null,
+      heartbeatCount: 0,
+      startedAt: now,
+      lastHeartbeatAt: now,
+      endedAt: null,
+      outputJson: null,
+      errorMessage: null,
+      metadataJson: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    store.close();
+
+    const originalKill = process.kill;
+    process.kill = ((() => {
+      const error = new Error("permission denied") as NodeJS.ErrnoException;
+      error.code = "EPERM";
+      throw error;
+    }) as typeof process.kill);
+
+    try {
+      const runtime = createLooperdRuntime({
+        config: fixture.config,
+        logger: fixture.logger,
+      });
+
+      await runtime.start();
+      await runtime.stop("test");
+    } finally {
+      process.kill = originalKill;
+    }
+
+    const verifyStore = new SqliteStore({
+      dbPath: fixture.config.storage.dbPath,
+      backupDir: fixture.config.storage.backupDir,
+    });
+    verifyStore.initialize();
+    expect(verifyStore.agentExecutions.getById("agent_exec_1")?.status).toBe(
+      "running",
+    );
+    expect(
+      verifyStore.events
+        .listByEntity("agent_execution", "agent_exec_1")
+        .some((event) => event.eventType === "agent.killed"),
+    ).toBe(false);
+    verifyStore.close();
+  });
+
   test("runs recovery before serving API and marks interrupted work", async () => {
     const fixture = await createFixture();
     const seedStore = new SqliteStore({
