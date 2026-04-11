@@ -263,47 +263,47 @@ describe("runCli", () => {
     const lines: string[] = [];
     const requests: string[] = [];
     const exitCode = await runCli(["ps", "--json"], {
-        stdout: (line) => lines.push(line),
-        loadConfigImpl: async () => createConfig() as never,
-        fetchImpl: async (input) => {
-          requests.push(String(input));
-          return new Response(
-            JSON.stringify({
-              ok: true,
-              requestId: "req_ps_json",
-              data: {
-                items: [
-                  {
-                    runId: "run_1",
-                    loopId: "loop_1",
-                    projectId: "project_1",
-                    type: "worker",
-                    status: "running",
-                    currentStep: "execute",
-                    startedAt: "2026-04-11T12:00:00.000Z",
-                    target: {
-                      type: "task",
-                      taskId: "task_1",
-                      label: "Ship CLI",
-                    },
-                    agent: {
-                      active: true,
-                      activeCount: 1,
-                      executionId: "agent_1",
-                      vendor: "opencode",
-                      pid: 1234,
-                      startedAt: "2026-04-11T12:00:01.000Z",
-                      lastHeartbeatAt: "2026-04-11T12:00:02.000Z",
-                      heartbeatCount: 3,
-                      status: "running",
-                    },
+      stdout: (line) => lines.push(line),
+      loadConfigImpl: async () => createConfig() as never,
+      fetchImpl: async (input) => {
+        requests.push(String(input));
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            requestId: "req_ps_json",
+            data: {
+              items: [
+                {
+                  runId: "run_1",
+                  loopId: "loop_1",
+                  projectId: "project_1",
+                  type: "worker",
+                  status: "running",
+                  currentStep: "execute",
+                  startedAt: "2026-04-11T12:00:00.000Z",
+                  target: {
+                    type: "task",
+                    taskId: "task_1",
+                    label: "Ship CLI",
                   },
-                ],
-              },
-            }),
-          );
-        },
-      });
+                  agent: {
+                    active: true,
+                    activeCount: 1,
+                    executionId: "agent_1",
+                    vendor: "opencode",
+                    pid: 1234,
+                    startedAt: "2026-04-11T12:00:01.000Z",
+                    lastHeartbeatAt: "2026-04-11T12:00:02.000Z",
+                    heartbeatCount: 3,
+                    status: "running",
+                  },
+                },
+              ],
+            },
+          }),
+        );
+      },
+    });
 
     expect(exitCode).toBe(0);
     expect(requests[0]).toContain("/api/v1/runs/active");
@@ -318,45 +318,45 @@ describe("runCli", () => {
 
     try {
       const exitCode = await runCli(["ps"], {
-          stdout: (line) => lines.push(line),
-          loadConfigImpl: async () => createConfig() as never,
-          fetchImpl: async () =>
-            new Response(
-              JSON.stringify({
-                ok: true,
-                requestId: "req_ps_table",
-                data: {
-                  items: [
-                    {
-                      runId: "run_worker_1",
-                      loopId: "loop_worker_1",
-                      projectId: "project_1",
-                      type: "worker",
-                      status: "running",
-                      currentStep: "execute",
-                      startedAt: "2026-04-11T12:00:00.000Z",
-                      target: {
-                        type: "task",
-                        taskId: "task_1",
-                        label: "Ship CLI",
-                      },
-                      agent: {
-                        active: true,
-                        activeCount: 2,
-                        executionId: "agent_2",
-                        vendor: "opencode",
-                        pid: 2222,
-                        startedAt: "2026-04-11T12:00:01.000Z",
-                        lastHeartbeatAt: "2026-04-11T12:00:02.000Z",
-                        heartbeatCount: 4,
-                        status: "running",
-                      },
+        stdout: (line) => lines.push(line),
+        loadConfigImpl: async () => createConfig() as never,
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              ok: true,
+              requestId: "req_ps_table",
+              data: {
+                items: [
+                  {
+                    runId: "run_worker_1",
+                    loopId: "loop_worker_1",
+                    projectId: "project_1",
+                    type: "worker",
+                    status: "running",
+                    currentStep: "execute",
+                    startedAt: "2026-04-11T12:00:00.000Z",
+                    target: {
+                      type: "task",
+                      taskId: "task_1",
+                      label: "Ship CLI",
                     },
-                  ],
-                },
-              }),
-            ),
-        });
+                    agent: {
+                      active: true,
+                      activeCount: 2,
+                      executionId: "agent_2",
+                      vendor: "opencode",
+                      pid: 2222,
+                      startedAt: "2026-04-11T12:00:01.000Z",
+                      lastHeartbeatAt: "2026-04-11T12:00:02.000Z",
+                      heartbeatCount: 4,
+                      status: "running",
+                    },
+                  },
+                ],
+              },
+            }),
+          ),
+      });
 
       expect(exitCode).toBe(0);
       expect(lines[0]).toContain("type");
@@ -383,17 +383,17 @@ describe("runCli", () => {
   test("prints ps empty state", async () => {
     const lines: string[] = [];
     const exitCode = await runCli(["ps"], {
-        stdout: (line) => lines.push(line),
-        loadConfigImpl: async () => createConfig() as never,
-        fetchImpl: async () =>
-          new Response(
-            JSON.stringify({
-              ok: true,
-              requestId: "req_ps_empty",
-              data: { items: [] },
-            }),
-          ),
-      });
+      stdout: (line) => lines.push(line),
+      loadConfigImpl: async () => createConfig() as never,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            ok: true,
+            requestId: "req_ps_empty",
+            data: { items: [] },
+          }),
+        ),
+    });
 
     expect(exitCode).toBe(0);
     expect(lines).toEqual(["No running loops."]);
@@ -404,19 +404,19 @@ describe("runCli", () => {
     const exitCode = await runCli(
       ["ps", "--type", "reviewer", "--project", "project_1"],
       {
-          stdout: () => {},
-          loadConfigImpl: async () => createConfig() as never,
-          fetchImpl: async (input) => {
-            requests.push(String(input));
-            return new Response(
-              JSON.stringify({
-                ok: true,
-                requestId: "req_ps_query",
-                data: { items: [] },
-              }),
-            );
-          },
+        stdout: () => {},
+        loadConfigImpl: async () => createConfig() as never,
+        fetchImpl: async (input) => {
+          requests.push(String(input));
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              requestId: "req_ps_query",
+              data: { items: [] },
+            }),
+          );
         },
+      },
     );
 
     expect(exitCode).toBe(0);
