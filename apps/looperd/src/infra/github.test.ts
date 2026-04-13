@@ -29,11 +29,23 @@ describe("GhCliGitHubGateway", () => {
   "pr list"*)
     printf '[{"number":42,"title":"Review me","url":"https://example.test/pr/42","state":"OPEN","isDraft":false,"reviewDecision":"REVIEW_REQUIRED","headRefName":"feature","baseRefName":"main","author":{"login":"octocat"},"reviewRequests":[{"__typename":"User","login":"OctoCat"},{"__typename":"Team","slug":"platform"}]}]'
     ;;
+  "label create"*)
+    printf '{}'
+    ;;
   "issue list"*)
     printf '[{"number":8,"title":"Fix gateway","body":"Issue body","url":"https://example.test/issues/8","state":"OPEN","author":{"login":"octocat"},"assignees":[{"login":"reviewer"}],"labels":[{"name":"phase-1"},{"name":"gateway"}]}]'
     ;;
   "issue view"*)
     printf '{"number":8,"title":"Fix gateway","body":"Issue body","url":"https://example.test/issues/8","state":"OPEN","author":{"login":"octocat"},"assignees":[{"login":"reviewer"}],"labels":[{"name":"phase-1"},{"name":"gateway"}]}'
+    ;;
+  "api repos/acme/looper/issues/42/labels --method POST -f labels[]=phase-1 -f labels[]=ready")
+    printf '{}'
+    ;;
+  "api repos/acme/looper/issues/42/labels/needs-work --method DELETE")
+    printf '{}'
+    ;;
+  "api repos/acme/looper/pulls/42/requested_reviewers --method POST -f reviewers[]=reviewer")
+    printf '{}'
     ;;
   "pr view"*)
     printf '{"number":42,"title":"Review me","body":"Body","url":"https://example.test/pr/42","state":"OPEN","isDraft":false,"reviewDecision":"CHANGES_REQUESTED","headRefName":"feature","baseRefName":"main","headRefOid":"abc123","baseRefOid":"def456","author":{"login":"octocat"},"reviewRequests":[{"requestedReviewer":{"__typename":"User","login":"reviewer"}},{"requestedReviewer":{"__typename":"Team","slug":"platform"}}],"comments":[{"state":"UNRESOLVED"}],"reviews":[{"state":"COMMENTED"}],"statusCheckRollup":[{"conclusion":"SUCCESS"}]}'
@@ -140,13 +152,19 @@ esac\n`,
     );
     expect(log).toContain("issue view 8 --repo acme/looper");
     expect(log).toContain(
-      "pr edit 42 --repo acme/looper --add-label phase-1,ready",
+      "label create phase-1 --repo acme/looper --color 5319e7 --description Managed by looper --force",
     );
     expect(log).toContain(
-      "pr edit 42 --repo acme/looper --remove-label needs-work",
+      "label create ready --repo acme/looper --color 5319e7 --description Managed by looper --force",
     );
     expect(log).toContain(
-      "pr edit 42 --repo acme/looper --add-reviewer reviewer",
+      "api repos/acme/looper/issues/42/labels --method POST -f labels[]=phase-1 -f labels[]=ready",
+    );
+    expect(log).toContain(
+      "api repos/acme/looper/issues/42/labels/needs-work --method DELETE",
+    );
+    expect(log).toContain(
+      "api repos/acme/looper/pulls/42/requested_reviewers --method POST -f reviewers[]=reviewer",
     );
     expect(log).toContain("threadId=thread-1");
   });
@@ -219,5 +237,40 @@ esac
         threadId: "thread-1",
       }),
     ).rejects.toThrow("Command exited with code 1");
+  });
+
+  test("ignores missing label errors when removing pull request labels", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "looper-gh-"));
+    cleanupPaths.push(rootDir);
+
+    const scriptPath = join(rootDir, "gh");
+    await writeFile(
+      scriptPath,
+      `#!/bin/sh
+case "$*" in
+  "api repos/acme/looper/issues/42/labels/looper%3Aspec-ready --method DELETE")
+    printf 'gh: HTTP 404: label does not exist (https://api.github.com/...)' >&2
+    exit 1
+    ;;
+  *)
+    printf '{}'
+    ;;
+esac
+`,
+    );
+    await chmod(scriptPath, 0o755);
+
+    const gateway = new GhCliGitHubGateway({
+      ghPath: scriptPath,
+      cwd: rootDir,
+    });
+
+    await expect(
+      gateway.removePullRequestLabels({
+        repo: "acme/looper",
+        prNumber: 42,
+        labels: ["looper:spec-ready"],
+      }),
+    ).resolves.toBeUndefined();
   });
 });
