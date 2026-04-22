@@ -1,43 +1,50 @@
 # looper
 
-Looper is a Bun workspace with three apps:
+Looper ships as Go binaries for the supported CLI + daemon workflows.
 
-- `apps/looperd` — the main daemon and HTTP API server
-- `apps/cli` — the `looper` command-line client
-- `apps/web` — a placeholder web app
+This repository currently contains:
 
-The current product is the daemon + CLI. The web app is not implemented yet.
+- `cmd/looperd` — the supported `looperd` daemon binary
+- `cmd/looper` — the supported `looper` CLI binary
+- `internal/` and `pkg/` — the active Go implementation
+
+The current product is the Go daemon + CLI.
 
 ## Requirements
 
-For the recommended install path:
+For the default supported install path:
 
 - macOS (`darwin-arm64` or `darwin-x64`)
-- Node.js/npm for installing `looper`
+- `git`
+- `gh`
 
 For source development:
 
-- [Bun](https://bun.sh/) `1.3.12`
+- Go `1.22`
 - `git`
 - `gh`
 - `osascript` if macOS notifications stay enabled
 
-`looperd` auto-detects tool paths with `Bun.which()`, but startup validation fails if required tools cannot be resolved.
+`looperd` auto-detects tool paths from `PATH`, but startup validation fails if required tools cannot be resolved.
 
 ## Installation
 
-Looper now uses a split distribution model:
+Looper now uses Go binaries as the default supported implementation:
 
-- `looper` CLI is installed with npm
-- `looperd` daemon is installed separately as a managed macOS binary
+- install the `looper` CLI from GitHub Releases
+- install `looperd` separately as a managed macOS binary with `looper daemon install`
+
+GitHub Releases publish standalone Go binaries for both `looper` and `looperd` on `darwin-arm64` and `darwin-x64`.
 
 Linux daemon artifacts are not supported in this phase.
 
 ### Install the CLI
 
-```bash
-npm install -g @powerformer/looper
-```
+Recommended path:
+
+1. Download the matching `looper` release artifact for your macOS architecture from GitHub Releases.
+2. Rename it to `looper` if needed.
+3. Place it on your `PATH`, for example `/usr/local/bin/looper` or `~/.local/bin/looper`.
 
 ### Install the daemon
 
@@ -94,27 +101,29 @@ Current phase behavior:
 - `looper upgrade --daemon` installs or upgrades the managed daemon binary
 - full `looper upgrade` for CLI + daemon together is not implemented yet
 - after a daemon upgrade, restart manually with `looper daemon restart`
+- replace the `looper` CLI binary manually when a newer GitHub Release is available
 
 ### From source
 
-If you want to develop from source, clone the repo and install workspace dependencies from the root:
+If you want to develop the supported Go binaries from source, clone the repo:
 
 ```bash
 git clone https://github.com/powerformer/looper.git
 cd looper
-bun install
 ```
 
-Then start the daemon from source:
+Then build or run the Go binaries:
 
 ```bash
-bun run dev
+go build ./cmd/looper
+go build ./cmd/looperd
+go run ./cmd/looperd
 ```
 
 In another shell, run the CLI from source:
 
 ```bash
-bun run looper -- status
+go run ./cmd/looper -- status
 ```
 
 ### Compatibility and version policy
@@ -123,62 +132,36 @@ bun run looper -- status
 - Short-lived version skew is allowed when the HTTP API remains compatible; the current expectation is that newer CLI builds should keep working with same-major daemons.
 - Management endpoints stay under `/api/v1/*` in the current phase, and minor releases should not introduce breaking protocol changes.
 - If the daemon is running, the CLI reads its current version from `/api/v1/status`; otherwise it falls back to `looperd --version`.
-- `looper upgrade --check` reads the latest CLI version from npm registry metadata and the latest daemon version from GitHub Releases metadata. If the daemon is not running, the CLI falls back to the installed binary version; if no binary is found, daemon current version is reported as not installed.
+- `looper upgrade --check` reads the latest CLI and daemon versions from GitHub Releases metadata. If the daemon is not running, the CLI falls back to the installed daemon binary version; if no binary is found, daemon current version is reported as not installed.
 - The CLI does not currently inject upgrade prompts into every command when the daemon is old; use `looper upgrade --check` to inspect drift and `looper upgrade --daemon` to update the managed binary.
-- Full major-version upgrade confirmation is not implemented in this phase because full `looper upgrade` is not implemented yet. If a future release needs breaking management API changes, it should move to a new API version such as `/api/v2/*`, and major-version upgrade confirmation can be added there.
-- If a breaking management API change is ever needed, it should move to a new API version such as `/api/v2/*` instead of silently breaking `/api/v1`.
+- Full major-version upgrade confirmation is not implemented in this phase because full `looper upgrade` is not implemented yet. If a future release needs breaking management API changes, it should move to a new API version such as `/api/v2/*` instead of silently breaking `/api/v1`.
 
 
-## Workspace commands
+## Development commands
 
 From the repo root:
 
-- `bun run dev` — run `apps/looperd`
-- `bun run looper -- <args>` — run the CLI directly from `apps/cli/src/index.ts` without rebuilding
-- `bun run build` — build `apps/looperd`, `apps/cli`, and `apps/web`
-- `bun run typecheck` — TypeScript project references check without emit
-- `bun run lint` — run Biome
-- `bun run test` — run all Bun tests
-
-Package-scoped commands:
-
-- `bun run --cwd apps/looperd dev|build|typecheck`
-- `bun run --cwd apps/cli dev|build|typecheck|test`
-- `bun run --cwd apps/web dev|build|typecheck`
-
-Focused tests:
-
-- `bun test apps/looperd/src/config/load.test.ts`
-- `bun test tests/smoke.test.ts`
+- `go run ./cmd/looperd`
+- `go run ./cmd/looper -- <args>`
+- `go build ./...`
+- `go vet ./...`
+- `go test ./...`
 
 ## Project structure
 
-### `apps/looperd`
+### `cmd/looperd`
 
-Daemon entry flow:
-
-`src/index.ts` → `bootstrapLooperd()` → runtime → Bun HTTP API server + SQLite store
-
-Responsibilities include:
+Supported daemon entrypoint. Responsibilities include:
 
 - loading and validating config
 - starting the SQLite-backed runtime
-- starting the Bun HTTP API server
+- serving the HTTP API
 - recovery on startup
 - writing logs and notifications
 
-### `apps/cli`
+### `cmd/looper`
 
-The CLI binary is `looper`.
-
-For local development, use one of these options:
-
-- `bun run looper -- ps` — runs the CLI from source without rebuilding
-- add a shell alias such as `alias looper='bun /absolute/path/to/looper/apps/cli/src/index.ts'` if you want to type `looper ps` directly during development
-
-Published installs should use the built `dist` entry declared in `apps/cli/package.json` and install the daemon separately via `looper daemon install`.
-
-The CLI connects to `looperd` over HTTP and supports commands under:
+Supported CLI entrypoint. The CLI connects to `looperd` over HTTP and supports commands under:
 
 - `project list|add`
 - `ps`
@@ -200,10 +183,6 @@ Manual review examples:
 
 - `looper review 123` — create a one-shot reviewer task for PR `123` in the current project
 - `looper review powerformer/looper#123 --loop` — keep re-reviewing that PR as new commits are pushed
-
-### `apps/web`
-
-Currently a stub that only logs a placeholder message.
 
 ## Configuration
 
@@ -240,7 +219,6 @@ Selected looperd environment overrides:
 - `LOOPER_LOG_DIR`
 - `LOOPER_DAEMON_MODE`
 - `LOOPER_WORKING_DIRECTORY`
-- `LOOPER_BUN_PATH`
 - `LOOPER_GIT_PATH`
 - `LOOPER_GH_PATH`
 - `LOOPER_OSASCRIPT_PATH`
@@ -262,7 +240,6 @@ Selected CLI config flags:
 - `--db-path`
 - `--log-dir`
 - `--daemon-mode`
-- `--bun-path`
 - `--git-path`
 - `--gh-path`
 - `--osascript-path`
@@ -281,6 +258,4 @@ Selected CLI config flags:
 
 ## Development notes
 
-- This repo uses TypeScript project references from the root `tsconfig.json`; root typecheck runs with `--noEmit`.
-- Formatting and linting use Biome with spaces.
-- Build output lives in `apps/*/dist/`; do not edit generated files.
+- Build output lives in `dist/`; do not edit generated files.
