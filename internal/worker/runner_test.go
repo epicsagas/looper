@@ -93,8 +93,15 @@ func TestProcessClaimedItemCompletesCreatePRFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Loops.GetByID() error = %v", err)
 	}
-	if loop == nil || loop.Status != "completed" || loop.MetadataJSON == nil || !strings.Contains(*loop.MetadataJSON, `"prNumber":101`) {
+	if loop == nil || loop.Status != "completed" || loop.TargetType != "pull_request" || loop.TargetID == nil || *loop.TargetID != "pr:acme/looper:101" || loop.PRNumber == nil || *loop.PRNumber != 101 || loop.MetadataJSON == nil || !strings.Contains(*loop.MetadataJSON, `"prNumber":101`) {
 		t.Fatalf("loop = %#v, want completed loop with PR metadata", loop)
+	}
+	queue, err := fixture.repos.Queue.GetByID(context.Background(), "queue_worker_1")
+	if err != nil {
+		t.Fatalf("Queue.GetByID() error = %v", err)
+	}
+	if queue == nil || queue.TargetType != "pull_request" || queue.TargetID != "pr:acme/looper:101" || queue.LockKey == nil || *queue.LockKey != "pr:acme/looper:101" || queue.PRNumber == nil || *queue.PRNumber != 101 {
+		t.Fatalf("queue = %#v, want retargeted queue item", queue)
 	}
 	run, err := fixture.repos.Runs.GetByID(context.Background(), result.RunID)
 	if err != nil {
@@ -528,6 +535,241 @@ func TestResolveWorkerInputUsesIssueURLRepoForIssueHydrationLookup(t *testing.T)
 	}
 }
 
+func TestProcessClaimedItemUsesIssueLockForIssueTargetedWorker(t *testing.T) {
+	t.Parallel()
+	fixture := newRunnerFixture(t)
+	issueTarget := "issue:acme/looper:27"
+	loopMetadata := `{"worker":{"title":"Implement worker loop","repo":"acme/looper","issueNumber":27,"baseBranch":"main"}}`
+	payload := `{"title":"Implement worker loop","repo":"acme/looper","issueNumber":27,"baseBranch":"main"}`
+	if err := fixture.repos.Loops.Upsert(context.Background(), storage.LoopRecord{
+		ID:           "loop_worker_issue",
+		Seq:          2,
+		ProjectID:    "project_1",
+		Type:         "worker",
+		TargetType:   "issue",
+		TargetID:     &issueTarget,
+		Repo:         stringPtr("acme/looper"),
+		Status:       "queued",
+		MetadataJSON: &loopMetadata,
+		NextRunAt:    stringPtr(fixture.nowISO()),
+		CreatedAt:    fixture.nowISO(),
+		UpdatedAt:    fixture.nowISO(),
+	}); err != nil {
+		t.Fatalf("Loops.Upsert(issue worker) error = %v", err)
+	}
+	projectID := "project_1"
+	loopID := "loop_worker_issue"
+	if err := fixture.repos.Queue.Upsert(context.Background(), storage.QueueItemRecord{
+		ID:          "queue_worker_issue",
+		ProjectID:   &projectID,
+		LoopID:      &loopID,
+		Type:        "worker",
+		TargetType:  "issue",
+		TargetID:    issueTarget,
+		Repo:        stringPtr("acme/looper"),
+		DedupeKey:   "worker:project_1:acme/looper:27",
+		Priority:    1,
+		Status:      "queued",
+		AvailableAt: fixture.nowISO(),
+		Attempts:    0,
+		MaxAttempts: 1,
+		PayloadJSON: &payload,
+		CreatedAt:   fixture.nowISO(),
+		UpdatedAt:   fixture.nowISO(),
+	}); err != nil {
+		t.Fatalf("Queue.Upsert(issue queue) error = %v", err)
+	}
+
+	runner := New(Options{
+		DB:              fixture.coordinator.DB(),
+		Repos:           fixture.repos,
+		GitHub:          &fakeGitHubGateway{},
+		Git:             &fakeGitGateway{},
+		AgentExecutor:   &fakeAgentExecutor{},
+		Logger:          fixture.logger,
+		Now:             fixture.now,
+		OpenPRStrategy:  config.OpenPRStrategyManual,
+		AllowAutoCommit: true,
+	})
+
+	claim, err := fixture.repos.Queue.ClaimNextOfType(context.Background(), fixture.nowISO(), "worker-issue", "worker")
+	if err != nil || claim == nil {
+		t.Fatalf("ClaimNextOfType() = (%#v, %v), want claimed issue worker", claim, err)
+	}
+	result, err := runner.ProcessClaimedItem(context.Background(), *claim)
+	if err != nil {
+		t.Fatalf("ProcessClaimedItem() error = %v", err)
+	}
+	if result.Status != "skipped" {
+		t.Fatalf("result = %#v, want skipped", result)
+	}
+	lock, err := fixture.repos.Locks.Get(context.Background(), "issue:acme/looper:27")
+	if err != nil {
+		t.Fatalf("Locks.Get() error = %v", err)
+	}
+	if lock != nil {
+		t.Fatalf("lock = %#v, want released issue lock", lock)
+	}
+}
+
+func TestProcessClaimedItemKeepsIssueLockKeyWhileRetargetingWorkerToPullRequest(t *testing.T) {
+	t.Parallel()
+	fixture := newRunnerFixture(t)
+	git := &fakeGitGateway{createResult: CreateWorktreeResult{WorktreePath: filepath.Join(t.TempDir(), "wt"), Branch: "looper/feature", BaseBranch: "main", HeadSHA: "abc123", WorktreeID: "worktree_1"}}
+	github := &fakeGitHubGateway{createPRResult: CreatePullRequestResult{Number: 101, URL: "https://example/pr/101"}}
+	agent := &fakeAgentExecutor{results: []AgentResult{{Status: "completed", Summary: "done", Stdout: "ok", ParseStatus: "parsed"}}}
+	completed := make([]RunCompletedInput, 0, 1)
+
+	loop, err := fixture.repos.Loops.GetByID(context.Background(), "loop_worker_1")
+	if err != nil {
+		t.Fatalf("Loops.GetByID() error = %v", err)
+	}
+	if loop == nil {
+		t.Fatal("loop = nil, want seeded worker loop")
+	}
+	issueTarget := "issue:acme/looper:27"
+	loopMetadata := `{"worker":{"title":"Implement worker loop","repo":"acme/looper","issueNumber":27,"baseBranch":"main"}}`
+	loop.TargetType = "issue"
+	loop.TargetID = &issueTarget
+	loop.MetadataJSON = &loopMetadata
+	loop.UpdatedAt = fixture.nowISO()
+	if err := fixture.repos.Loops.Upsert(context.Background(), *loop); err != nil {
+		t.Fatalf("Loops.Upsert() error = %v", err)
+	}
+
+	queue, err := fixture.repos.Queue.GetByID(context.Background(), "queue_worker_1")
+	if err != nil {
+		t.Fatalf("Queue.GetByID() error = %v", err)
+	}
+	if queue == nil {
+		t.Fatal("queue = nil, want seeded worker queue item")
+	}
+	payload := `{"title":"Implement worker loop","prompt":"Do the thing","repo":"acme/looper","issueNumber":27,"baseBranch":"main"}`
+	queue.TargetType = "issue"
+	queue.TargetID = issueTarget
+	queue.LockKey = stringPtr(issueTarget)
+	queue.PayloadJSON = &payload
+	queue.UpdatedAt = fixture.nowISO()
+	if err := fixture.repos.Queue.Upsert(context.Background(), *queue); err != nil {
+		t.Fatalf("Queue.Upsert() error = %v", err)
+	}
+
+	runner := New(Options{DB: fixture.coordinator.DB(), Repos: fixture.repos, GitHub: github, Git: git, AgentExecutor: agent, Logger: fixture.logger, Now: fixture.now, AllowAutoCommit: true, AllowAutoPush: true, OpenPRStrategy: config.OpenPRStrategyAllDone, OnRunCompleted: func(_ context.Context, input RunCompletedInput) error {
+		queue, err := fixture.repos.Queue.GetByID(context.Background(), "queue_worker_1")
+		if err != nil {
+			t.Fatalf("Queue.GetByID() in notification callback error = %v", err)
+		}
+		if queue == nil || queue.LockKey == nil || *queue.LockKey != issueTarget {
+			t.Fatalf("queue during notification = %#v, want in-flight issue lock key", queue)
+		}
+		lock, err := fixture.repos.Locks.Get(context.Background(), issueTarget)
+		if err != nil {
+			t.Fatalf("Locks.Get() in notification callback error = %v", err)
+		}
+		if lock == nil {
+			t.Fatal("issue lock during notification = nil, want held in-flight issue lock")
+		}
+		completed = append(completed, input)
+		return nil
+	}})
+
+	claim, err := fixture.repos.Queue.ClaimNextOfType(context.Background(), fixture.nowISO(), "worker-1", "worker")
+	if err != nil || claim == nil {
+		t.Fatalf("ClaimNextOfType() = (%#v, %v), want claimed item", claim, err)
+	}
+	result, err := runner.ProcessClaimedItem(context.Background(), *claim)
+	if err != nil {
+		t.Fatalf("ProcessClaimedItem() error = %v", err)
+	}
+	if result.Status != "success" || result.PullRequestNumber != 101 {
+		t.Fatalf("result = %#v, want success with PR 101", result)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("len(completed) = %d, want 1", len(completed))
+	}
+
+	updatedQueue, err := fixture.repos.Queue.GetByID(context.Background(), "queue_worker_1")
+	if err != nil {
+		t.Fatalf("Queue.GetByID() after run error = %v", err)
+	}
+	if updatedQueue == nil || updatedQueue.TargetType != "pull_request" || updatedQueue.TargetID != "pr:acme/looper:101" || updatedQueue.LockKey == nil || *updatedQueue.LockKey != "pr:acme/looper:101" {
+		t.Fatalf("queue = %#v, want retargeted queue item with persisted PR lock key", updatedQueue)
+	}
+	latestRun, err := fixture.repos.Runs.GetLatestByLoopID(context.Background(), "loop_worker_1")
+	if err != nil {
+		t.Fatalf("Runs.GetLatestByLoopID() error = %v", err)
+	}
+	if latestRun == nil {
+		t.Fatal("latestRun = nil, want persisted worker run")
+	}
+	latestCheckpoint, err := parseCheckpoint(latestRun.CheckpointJSON)
+	if err != nil {
+		t.Fatalf("parseCheckpoint(latestRun) error = %v", err)
+	}
+	if latestCheckpoint.ClaimedLockKey != "pr:acme/looper:101" {
+		t.Fatalf("checkpoint.ClaimedLockKey = %q, want pr:acme/looper:101", latestCheckpoint.ClaimedLockKey)
+	}
+	issueLock, err := fixture.repos.Locks.Get(context.Background(), issueTarget)
+	if err != nil {
+		t.Fatalf("Locks.Get(issue) after run error = %v", err)
+	}
+	if issueLock != nil {
+		t.Fatalf("issue lock = %#v, want released after run", issueLock)
+	}
+}
+
+func TestPersistPullRequestReferenceRollsBackLoopWhenQueueUpdateFails(t *testing.T) {
+	t.Parallel()
+	fixture := newRunnerFixture(t)
+	runner := New(Options{DB: fixture.coordinator.DB(), Repos: fixture.repos, Logger: fixture.logger, Now: fixture.now})
+
+	loop, err := fixture.repos.Loops.GetByID(context.Background(), "loop_worker_1")
+	if err != nil {
+		t.Fatalf("Loops.GetByID() error = %v", err)
+	}
+	if loop == nil {
+		t.Fatal("loop = nil, want seeded worker loop")
+	}
+	queue, err := fixture.repos.Queue.GetByID(context.Background(), "queue_worker_1")
+	if err != nil {
+		t.Fatalf("Queue.GetByID() error = %v", err)
+	}
+	if queue == nil {
+		t.Fatal("queue = nil, want seeded worker queue")
+	}
+
+	originalTargetType := loop.TargetType
+	originalTargetID := derefString(loop.TargetID)
+	originalPRNumber := loop.PRNumber
+	queue.Status = "invalid"
+	err = runner.persistPullRequestReference(context.Background(), *loop, *queue, "acme/looper", checkpointPullPR{Number: 101, URL: "https://example/pr/101"})
+	if err == nil {
+		t.Fatal("persistPullRequestReference() error = nil, want queue upsert failure")
+	}
+
+	updatedLoop, err := fixture.repos.Loops.GetByID(context.Background(), "loop_worker_1")
+	if err != nil {
+		t.Fatalf("Loops.GetByID(updated) error = %v", err)
+	}
+	if updatedLoop == nil {
+		t.Fatal("updated loop = nil, want seeded worker loop")
+	}
+	if updatedLoop.TargetType != originalTargetType || derefString(updatedLoop.TargetID) != originalTargetID || updatedLoop.PRNumber != originalPRNumber {
+		t.Fatalf("loop after failed persist = %#v, want original target %s %s", updatedLoop, originalTargetType, originalTargetID)
+	}
+
+	updatedQueue, err := fixture.repos.Queue.GetByID(context.Background(), "queue_worker_1")
+	if err != nil {
+		t.Fatalf("Queue.GetByID(updated) error = %v", err)
+	}
+	if updatedQueue == nil {
+		t.Fatal("updated queue = nil, want seeded worker queue")
+	}
+	if updatedQueue.TargetType != "issue" || updatedQueue.TargetID != "issue:acme/looper:27" || updatedQueue.PRNumber != nil {
+		t.Fatalf("queue after failed persist = %#v, want original issue target", updatedQueue)
+	}
+}
+
 func TestProcessClaimedItemResumesFromOpenPRAfterRetryableFailure(t *testing.T) {
 	t.Parallel()
 	fixture := newRunnerFixture(t)
@@ -577,6 +819,65 @@ func TestProcessClaimedItemResumesFromOpenPRAfterRetryableFailure(t *testing.T) 
 	}
 	if len(github.createIssueCommentCalls) != 1 {
 		t.Fatalf("len(github.createIssueCommentCalls) = %d, want 1 running marker across resume", len(github.createIssueCommentCalls))
+	}
+}
+
+func TestFindPreviousIssueClaimPrefersNewestMatchingRun(t *testing.T) {
+	t.Parallel()
+	fixture := newRunnerFixture(t)
+	runner := New(Options{DB: fixture.coordinator.DB(), Repos: fixture.repos, Logger: fixture.logger, Now: fixture.now})
+
+	oldCheckpoint := mustMarshalJSON(workerCheckpoint{
+		IssueClaim: &checkpointIssueClaim{Repo: "acme/looper", IssueNumber: 27, CommentID: 101, Status: issueClaimStatusRunning},
+	})
+	if err := fixture.repos.Runs.Upsert(context.Background(), storage.RunRecord{
+		ID:             "run_old_claim",
+		LoopID:         "loop_worker_1",
+		Status:         "failed",
+		CheckpointJSON: &oldCheckpoint,
+		StartedAt:      fixture.nowISO(),
+		CreatedAt:      fixture.nowISO(),
+		UpdatedAt:      fixture.nowISO(),
+	}); err != nil {
+		t.Fatalf("Runs.Upsert(old claim) error = %v", err)
+	}
+
+	fixture.advance(time.Second)
+	newCheckpoint := mustMarshalJSON(workerCheckpoint{
+		IssueClaim: &checkpointIssueClaim{Repo: "acme/looper", IssueNumber: 27, CommentID: 202, Status: issueClaimStatusRunning},
+	})
+	if err := fixture.repos.Runs.Upsert(context.Background(), storage.RunRecord{
+		ID:             "run_new_claim",
+		LoopID:         "loop_worker_1",
+		Status:         "failed",
+		CheckpointJSON: &newCheckpoint,
+		StartedAt:      fixture.nowISO(),
+		CreatedAt:      fixture.nowISO(),
+		UpdatedAt:      fixture.nowISO(),
+	}); err != nil {
+		t.Fatalf("Runs.Upsert(new claim) error = %v", err)
+	}
+
+	fixture.advance(time.Second)
+	currentCheckpoint := mustMarshalJSON(workerCheckpoint{})
+	if err := fixture.repos.Runs.Upsert(context.Background(), storage.RunRecord{
+		ID:             "run_current",
+		LoopID:         "loop_worker_1",
+		Status:         "running",
+		CheckpointJSON: &currentCheckpoint,
+		StartedAt:      fixture.nowISO(),
+		CreatedAt:      fixture.nowISO(),
+		UpdatedAt:      fixture.nowISO(),
+	}); err != nil {
+		t.Fatalf("Runs.Upsert(current) error = %v", err)
+	}
+
+	claim := runner.findPreviousIssueClaim(context.Background(), "loop_worker_1", "run_current", "acme/looper", 27)
+	if claim == nil {
+		t.Fatal("findPreviousIssueClaim() = nil, want newest prior claim")
+	}
+	if claim.CommentID != 202 {
+		t.Fatalf("claim.CommentID = %d, want 202 from newest run", claim.CommentID)
 	}
 }
 
@@ -1311,6 +1612,9 @@ func (f *fakeAgentExecutor) Start(_ context.Context, input AgentRunInput) (Agent
 	result := AgentResult{Status: "completed", Summary: "done", ParseStatus: "parsed"}
 	if f.index < len(f.results) {
 		result = f.results[f.index]
+	}
+	if result.Status == "completed" && result.ParseStatus == "" {
+		result.ParseStatus = "parsed"
 	}
 	f.index++
 	return fakeAgentExecution{result: result, waitErr: f.waitErr, wait: f.wait}, nil

@@ -2526,12 +2526,15 @@ func (h *Handler) buildWorkersCreateResponse(r *http.Request) (workerCreateRespo
 	nowISO := eventlog.FormatJavaScriptISOString(h.now().UTC())
 	targetType := string(domain.LoopTargetTypeProject)
 	targetID := "project:" + projectID
+	target := domain.LoopTarget{TargetType: domain.LoopTargetTypeProject, ProjectID: projectID}
 	if effectivePRNumber != nil {
 		targetType = string(domain.LoopTargetTypePullRequest)
 		targetID = fmt.Sprintf("pr:%s:%d", *repo, *effectivePRNumber)
+		target = domain.LoopTarget{TargetType: domain.LoopTargetTypePullRequest, Repo: *repo, PRNumber: *effectivePRNumber}
 	} else if issueNumber != nil {
 		targetType = string(domain.LoopTargetTypeIssue)
 		targetID = fmt.Sprintf("issue:%s:%d", *repo, *issueNumber)
+		target = domain.LoopTarget{TargetType: domain.LoopTargetTypeIssue, Repo: *repo, IssueNumber: *issueNumber}
 	}
 
 	workerPayload := struct {
@@ -2572,12 +2575,6 @@ func (h *Handler) buildWorkersCreateResponse(r *http.Request) (workerCreateRespo
 			return storage.LoopRecord{}, seqErr
 		}
 
-		target := domain.LoopTarget{TargetType: domain.LoopTargetTypeProject, ProjectID: projectID}
-		if effectivePRNumber != nil {
-			target = domain.LoopTarget{TargetType: domain.LoopTargetTypePullRequest, Repo: *repo, PRNumber: *effectivePRNumber}
-		} else if issueNumber != nil {
-			target = domain.LoopTarget{TargetType: domain.LoopTargetTypeIssue, Repo: *repo, IssueNumber: *issueNumber}
-		}
 		existing, listErr := repos.Loops.List(r.Context())
 		if listErr != nil {
 			return storage.LoopRecord{}, listErr

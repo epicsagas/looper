@@ -596,7 +596,21 @@ func (r *Runner) ProcessClaimedItem(ctx context.Context, queueItem storage.Queue
 	}
 	defer func() {
 		if acquiredClaimedLock && claimedLockKey != "" {
-			_ = r.repos.Locks.Release(context.Background(), claimedLockKey)
+			releaseCtx := context.Background()
+			_ = r.repos.Locks.Release(releaseCtx, claimedLockKey)
+			if strings.HasPrefix(claimedLockKey, "issue:") && checkpoint.PullRequest != nil && checkpoint.Work != nil && checkpoint.Work.Repo != "" && checkpoint.PullRequest.Number > 0 {
+				prLockKey := fmt.Sprintf("pr:%s:%d", checkpoint.Work.Repo, checkpoint.PullRequest.Number)
+				if err := r.repos.Queue.UpdateLockKey(releaseCtx, queueItem.ID, prLockKey, r.nowISO()); err != nil {
+					if r.logger != nil {
+						r.logger.Warn("worker queue lock retarget failed", map[string]any{"queueItemId": queueItem.ID, "lockKey": prLockKey, "error": err.Error()})
+					}
+				} else {
+					checkpoint.ClaimedLockKey = prLockKey
+					if err := r.persistCheckpoint(releaseCtx, run.ID, checkpoint); err != nil && r.logger != nil {
+						r.logger.Warn("worker checkpoint lock retarget failed", map[string]any{"runId": run.ID, "queueItemId": queueItem.ID, "lockKey": prLockKey, "error": err.Error()})
+					}
+				}
+			}
 		}
 	}()
 	if _, err := r.updateLoop(ctx, *loop, func(updated *storage.LoopRecord) {
@@ -945,6 +959,7 @@ func (r *Runner) runOpenPRStep(ctx context.Context, input stepInput) (workerChec
 		if checkpoint.PullRequest == nil {
 			checkpoint.PullRequest = &checkpointPullPR{Number: derefInt64(input.Loop.PRNumber), URL: stringFromAnyDefault(parseJSONObject(input.Loop.MetadataJSON)["prUrl"])}
 		}
+		r.syncIssueClaim(ctx, input, &checkpoint, issueClaimStatusPRLinked, "")
 		return checkpoint, nil
 	}
 	if checkpoint.Validation != nil && !checkpoint.Validation.Passed {
@@ -993,7 +1008,7 @@ func (r *Runner) runOpenPRStep(ctx context.Context, input stepInput) (workerChec
 			return checkpoint, &loopError{message: err.Error(), kind: FailureRetryableAfterResume}
 		}
 		_ = r.assignReviewersIfNeeded(ctx, work, existing.Number, input.Project.RepoPath)
-		if err := r.persistPullRequestReference(ctx, input.Loop, work.Repo, checkpointPullPR{Number: existing.Number, URL: existing.URL}); err != nil {
+		if err := r.persistPullRequestReference(ctx, input.Loop, input.QueueItem, work.Repo, checkpointPullPR{Number: existing.Number, URL: existing.URL}); err != nil {
 			return checkpoint, err
 		}
 		checkpoint.PullRequest = &checkpointPullPR{Number: existing.Number, URL: existing.URL}
@@ -1006,7 +1021,7 @@ func (r *Runner) runOpenPRStep(ctx context.Context, input stepInput) (workerChec
 	}
 	if existing, err := r.findOpenPullRequestForBranch(ctx, work.Repo, aliases, work.BaseBranch, input.Project.RepoPath); err == nil && existing != nil {
 		_ = r.assignReviewersIfNeeded(ctx, work, existing.Number, input.Project.RepoPath)
-		if err := r.persistPullRequestReference(ctx, input.Loop, work.Repo, checkpointPullPR{Number: existing.Number, URL: existing.URL}); err != nil {
+		if err := r.persistPullRequestReference(ctx, input.Loop, input.QueueItem, work.Repo, checkpointPullPR{Number: existing.Number, URL: existing.URL}); err != nil {
 			return checkpoint, err
 		}
 		checkpoint.PullRequest = &checkpointPullPR{Number: existing.Number, URL: existing.URL}
@@ -1023,7 +1038,7 @@ func (r *Runner) runOpenPRStep(ctx context.Context, input stepInput) (workerChec
 	}
 	_ = r.assignReviewersIfNeeded(ctx, work, created.Number, input.Project.RepoPath)
 	pr := checkpointPullPR{Number: created.Number, URL: created.URL}
-	if err := r.persistPullRequestReference(ctx, input.Loop, work.Repo, pr); err != nil {
+	if err := r.persistPullRequestReference(ctx, input.Loop, input.QueueItem, work.Repo, pr); err != nil {
 		return checkpoint, err
 	}
 	checkpoint.PullRequest = &pr
@@ -1101,6 +1116,18 @@ func (r *Runner) resolveWorkerInput(ctx context.Context, project storage.Project
 		}
 	}
 	return work, nil
+}
+
+func parseIssueNumberFromTargetID(targetID string) int64 {
+	parts := strings.Split(strings.TrimSpace(targetID), ":")
+	if len(parts) != 3 || parts[0] != "issue" {
+		return 0
+	}
+	value, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || value <= 0 {
+		return 0
+	}
+	return value
 }
 
 func (r *Runner) createRunContext(ctx context.Context, loop storage.LoopRecord) (resumedRunContext, error) {
@@ -1298,19 +1325,51 @@ func (r *Runner) assignReviewersIfNeeded(ctx context.Context, work workerInput, 
 	return r.github.AddPullRequestReviewers(ctx, PullRequestReviewersInput{Repo: work.Repo, PRNumber: prNumber, Reviewers: append([]string(nil), work.Reviewers...), CWD: cwd})
 }
 
-func (r *Runner) persistPullRequestReference(ctx context.Context, loop storage.LoopRecord, repo string, pr checkpointPullPR) error {
+func (r *Runner) persistPullRequestReference(ctx context.Context, loop storage.LoopRecord, queueItem storage.QueueItemRecord, repo string, pr checkpointPullPR) error {
+	if r.db == nil {
+		return fmt.Errorf("worker runner database is not configured")
+	}
 	metadataJSON, err := mergeLoopMetadataJSON(loop.MetadataJSON, map[string]any{"prUrl": pr.URL, "prNumber": pr.Number, "repo": repo})
 	if err != nil {
 		return err
 	}
-	_, err = r.updateLoop(ctx, loop, func(updated *storage.LoopRecord) {
-		updated.Repo = stringPtr(repo)
-		if updated.TargetType == "pull_request" {
-			updated.PRNumber = int64Ptr(pr.Number)
+	targetID := fmt.Sprintf("pr:%s:%d", repo, pr.Number)
+	updatedQueue := queueItem
+	updatedQueue.TargetType = "pull_request"
+	updatedQueue.TargetID = targetID
+	updatedQueue.Repo = stringPtr(repo)
+	updatedQueue.PRNumber = int64Ptr(pr.Number)
+	if !strings.HasPrefix(derefString(queueItem.LockKey), "issue:") {
+		updatedQueue.LockKey = stringPtr(targetID)
+	}
+	projectID := derefString(queueItem.ProjectID)
+	if projectID != "" {
+		updatedQueue.DedupeKey = fmt.Sprintf("worker:%s:%s:%d", projectID, repo, pr.Number)
+	}
+	nowISO := r.nowISO()
+	updatedQueue.UpdatedAt = nowISO
+
+	return storage.WithTransaction(ctx, r.db, nil, func(tx *sql.Tx) error {
+		repos := storage.NewRepositories(tx)
+		current, err := repos.Loops.GetByID(ctx, loop.ID)
+		if err != nil {
+			return err
 		}
-		updated.MetadataJSON = stringPtr(metadataJSON)
+		if current == nil {
+			return fmt.Errorf("loop not found: %s", loop.ID)
+		}
+		updatedLoop := *current
+		updatedLoop.Repo = stringPtr(repo)
+		updatedLoop.TargetType = "pull_request"
+		updatedLoop.TargetID = stringPtr(targetID)
+		updatedLoop.PRNumber = int64Ptr(pr.Number)
+		updatedLoop.MetadataJSON = stringPtr(metadataJSON)
+		updatedLoop.UpdatedAt = nowISO
+		if err := repos.Loops.Upsert(ctx, updatedLoop); err != nil {
+			return err
+		}
+		return repos.Queue.Upsert(ctx, updatedQueue)
 	})
-	return err
 }
 
 func (r *Runner) failQueueItem(ctx context.Context, queueItem storage.QueueItemRecord, kind QueueFailureKind, message string) (*storage.QueueItemRecord, error) {
@@ -1418,7 +1477,7 @@ func (r *Runner) findPreviousIssueClaim(ctx context.Context, loopID, currentRunI
 	if err != nil {
 		return nil
 	}
-	for i := len(runs) - 1; i >= 0; i-- {
+	for i := 0; i < len(runs); i++ {
 		if runs[i].ID == currentRunID {
 			continue
 		}
@@ -1695,18 +1754,6 @@ func requireWorktree(checkpoint workerCheckpoint) (checkpointWorktree, error) {
 		return checkpointWorktree{}, &loopError{message: "missing worker worktree checkpoint", kind: FailureRetryableTransient}
 	}
 	return *checkpoint.Worktree, nil
-}
-
-func parseIssueNumberFromTargetID(targetID string) int64 {
-	parts := strings.Split(strings.TrimSpace(targetID), ":")
-	if len(parts) != 3 || parts[0] != "issue" {
-		return 0
-	}
-	value, err := strconv.ParseInt(parts[2], 10, 64)
-	if err != nil || value <= 0 {
-		return 0
-	}
-	return value
 }
 
 func buildIssueLockKey(repo string, issueNumber int64) string {
