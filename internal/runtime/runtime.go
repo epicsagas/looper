@@ -916,7 +916,8 @@ func buildRecoveryQueueItem(loop storage.LoopRecord, nowISO string, maxAttempts 
 			return storage.QueueItemRecord{}, false, err
 		}
 		lockKey := fmt.Sprintf("issue:%s:%d", repo, issueNumber)
-		payloadJSON := fmt.Sprintf(`{"issueNumber":%d}`, issueNumber)
+		payload := map[string]any{"issueNumber": issueNumber}
+		payloadJSON := mustMarshalJSON(payload)
 		queueRecord.TargetType = string(domain.LoopTargetTypeIssue)
 		queueRecord.TargetID = lockKey
 		queueRecord.Repo = &repo
