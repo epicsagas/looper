@@ -297,6 +297,7 @@ func (a *App) newRootCommand(argv []string) *cobra.Command {
 				localFlags: []flagSpec{
 					stringFlag("project", "projectId", "Project id"),
 					boolFlag("loop", "Keep reviewing when new commits are pushed"),
+					boolFlag("no-loop", "Run only one review pass"),
 				},
 				exampleLines: []string{
 					"$ looper review 123",
@@ -544,6 +545,10 @@ func globalFlags() []flagSpec {
 		stringFlag("gh-path", "path", "GitHub CLI path"),
 		stringFlag("osascript-path", "path", "osascript binary path"),
 		stringFlag("fix-all-pull-requests", "bool", "Allow fixer to inspect and fix PRs created by any author"),
+		stringFlag("reviewer-loop-enabled", "bool", "Enable reviewer follow-up loops by default"),
+		stringFlag("reviewer-quiet-period-seconds", "seconds", "Reviewer loop quiet period"),
+		stringFlag("reviewer-max-iterations-per-pr", "count", "Reviewer loop max iterations per PR"),
+		stringFlag("reviewer-max-iterations-per-head", "count", "Reviewer loop max iterations per head"),
 	}
 }
 
@@ -590,16 +595,20 @@ func (a *App) stderr() io.Writer {
 }
 
 var configFlagNames = map[string]struct{}{
-	"config":                {},
-	"host":                  {},
-	"port":                  {},
-	"db-path":               {},
-	"log-dir":               {},
-	"daemon-mode":           {},
-	"git-path":              {},
-	"gh-path":               {},
-	"osascript-path":        {},
-	"fix-all-pull-requests": {},
+	"config":                           {},
+	"host":                             {},
+	"port":                             {},
+	"db-path":                          {},
+	"log-dir":                          {},
+	"daemon-mode":                      {},
+	"git-path":                         {},
+	"gh-path":                          {},
+	"osascript-path":                   {},
+	"fix-all-pull-requests":            {},
+	"reviewer-loop-enabled":            {},
+	"reviewer-quiet-period-seconds":    {},
+	"reviewer-max-iterations-per-pr":   {},
+	"reviewer-max-iterations-per-head": {},
 }
 
 func ExtractConfigArgs(argv []string) []string {

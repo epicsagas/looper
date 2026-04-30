@@ -20,6 +20,7 @@ import (
 
 	"github.com/powerformer/looper/internal/bootstrap"
 	"github.com/powerformer/looper/internal/config"
+	"github.com/powerformer/looper/internal/domain"
 	"github.com/powerformer/looper/internal/projects"
 	looperdruntime "github.com/powerformer/looper/internal/runtime"
 	"github.com/powerformer/looper/internal/storage"
@@ -56,9 +57,22 @@ func TestHandlerHealthzSuccessAndRequestIDEcho(t *testing.T) {
 	}
 }
 
+func TestIsTerminalReviewerLoopRecordTreatsFailedAsTerminal(t *testing.T) {
+	t.Parallel()
+	metadata := `{"loop":{"status":"failed"}}`
+
+	if !isTerminalReviewerLoopRecord(storage.LoopRecord{Type: "reviewer", Status: "failed"}) {
+		t.Fatalf("failed record status was not terminal")
+	}
+	if !isTerminalReviewerLoopRecord(storage.LoopRecord{Type: "reviewer", Status: "running", MetadataJSON: &metadata}) {
+		t.Fatalf("failed metadata status was not terminal")
+	}
+}
+
 func TestHandlerStatusSuccessContainsExpectedSections(t *testing.T) {
 	rt, cfg := startTestRuntime(t)
 	seedStatusData(t, rt)
+	seedStatusLoopCounts(t, rt)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
 	req.Header.Set("x-request-id", "fixture-request-id")
@@ -99,7 +113,11 @@ func TestHandlerStatusSuccessContainsExpectedSections(t *testing.T) {
 	assertEqual(t, scheduler["activeRuns"], float64(1))
 
 	reviewer := loops["reviewer"].(map[string]any)
+	assertEqual(t, reviewer["queued"], float64(1))
 	assertEqual(t, reviewer["running"], float64(1))
+	assertEqual(t, reviewer["waiting"], float64(1))
+	assertEqual(t, reviewer["terminated"], float64(1))
+	assertEqual(t, reviewer["stopped"], float64(1))
 }
 
 func TestHandlerConfigSuccessContainsExpectedSections(t *testing.T) {
@@ -121,6 +139,8 @@ func TestHandlerConfigSuccessContainsExpectedSections(t *testing.T) {
 	server := data["server"].(map[string]any)
 	storageInfo := data["storage"].(map[string]any)
 	daemon := data["daemon"].(map[string]any)
+	reviewer := data["reviewer"].(map[string]any)
+	reviewerLoop := reviewer["loop"].(map[string]any)
 
 	assertEqual(t, server["host"], cfg.Server.Host)
 	assertEqual(t, server["port"], float64(cfg.Server.Port))
@@ -129,6 +149,11 @@ func TestHandlerConfigSuccessContainsExpectedSections(t *testing.T) {
 	assertEqual(t, storageInfo["mode"], cfg.Storage.Mode)
 	assertEqual(t, daemon["mode"], string(cfg.Daemon.Mode))
 	assertEqual(t, daemon["workingDirectory"], cfg.Daemon.WorkingDirectory)
+	assertEqual(t, reviewer["scope"], string(cfg.Reviewer.Scope))
+	assertEqual(t, reviewer["publishMode"], string(cfg.Reviewer.PublishMode))
+	assertEqual(t, reviewer["detectDuplicateFindings"], cfg.Reviewer.DetectDuplicateFindings)
+	assertEqual(t, reviewerLoop["enabledByDefault"], cfg.Reviewer.Loop.EnabledByDefault)
+	assertEqual(t, reviewerLoop["maxConsecutiveFailures"], float64(cfg.Reviewer.Loop.MaxConsecutiveFailures))
 	if _, ok := daemon["shutdownTimeoutMs"]; ok {
 		t.Fatalf("daemon.shutdownTimeoutMs should be omitted from config response: %#v", daemon)
 	}
@@ -1123,6 +1148,43 @@ func TestHandlerLoopStatusMutationsReconcileQueueItems(t *testing.T) {
 	}
 }
 
+func TestHandlerLoopStartRejectsTerminalReviewerLoop(t *testing.T) {
+	fixture := newTestFixture(t)
+	services := fixture.runtime.Services()
+	nowISO := fixture.now.UTC().Format(javaScriptISOString)
+	repo := "acme/looper"
+	prNumber := int64(42)
+	if err := services.Repositories.Projects.Upsert(context.Background(), storage.ProjectRecord{ID: "project_1", Name: "Looper", RepoPath: "/tmp/repos/looper", CreatedAt: nowISO, UpdatedAt: nowISO}); err != nil {
+		t.Fatalf("Projects.Upsert() error = %v", err)
+	}
+	metadataTerminated := `{"loop":{"status":"terminated"}}`
+	loops := []storage.LoopRecord{
+		{ID: "loop_reviewer_terminated", Seq: 10, ProjectID: "project_1", Type: "reviewer", TargetType: "pull_request", Repo: &repo, PRNumber: &prNumber, Status: "terminated", CreatedAt: nowISO, UpdatedAt: nowISO},
+		{ID: "loop_reviewer_metadata_terminated", Seq: 11, ProjectID: "project_1", Type: "reviewer", TargetType: "pull_request", Repo: &repo, PRNumber: &prNumber, Status: "completed", MetadataJSON: &metadataTerminated, CreatedAt: nowISO, UpdatedAt: nowISO},
+	}
+	for _, loop := range loops {
+		if err := services.Repositories.Loops.Upsert(context.Background(), loop); err != nil {
+			t.Fatalf("Loops.Upsert(%s) error = %v", loop.ID, err)
+		}
+	}
+	h := NewHandler(Context{Config: fixture.config, Runtime: fixture.runtime, Now: func() time.Time { return fixture.now.Add(time.Minute) }})
+	for _, loop := range loops {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/loops/"+loop.ID+"/start", nil)
+		recorder := httptest.NewRecorder()
+		h.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("start %s status = %d, want 400", loop.ID, recorder.Code)
+		}
+		updated, err := services.Repositories.Loops.GetByID(context.Background(), loop.ID)
+		if err != nil || updated == nil {
+			t.Fatalf("Loops.GetByID(%s) = (%#v, %v), want loop", loop.ID, updated, err)
+		}
+		if updated.Status != loop.Status {
+			t.Fatalf("loop %s status = %q, want unchanged %q", loop.ID, updated.Status, loop.Status)
+		}
+	}
+}
+
 func TestHandlerLoopStartIsIdempotentWhenQueueItemAlreadyActive(t *testing.T) {
 	fixture := newTestFixture(t)
 	services := fixture.runtime.Services()
@@ -1656,6 +1718,22 @@ func TestHandlerWorkerAndPlannerCreateRejectActiveLoopConflicts(t *testing.T) {
 	assertEqual(t, plannerError["code"], "LOOP_CONFLICT")
 }
 
+func TestAssertUniqueActiveLoopCompatAllowsWaitingReviewerRerun(t *testing.T) {
+	existing := []storage.LoopRecord{{
+		ID:         "loop_waiting",
+		ProjectID:  "project_1",
+		Type:       string(domain.LoopTypeReviewer),
+		TargetType: string(domain.LoopTargetTypePullRequest),
+		Repo:       stringPtr("acme/looper"),
+		PRNumber:   int64Ptr(42),
+		Status:     string(domain.LoopStatusWaiting),
+	}}
+	target := domain.LoopTarget{TargetType: domain.LoopTargetTypePullRequest, Repo: "acme/looper", PRNumber: 42}
+	if err := assertUniqueActiveLoopCompat(existing, "loop_new", "project_1", domain.LoopTypeReviewer, target, domain.LoopStatusQueued); err != nil {
+		t.Fatalf("assertUniqueActiveLoopCompat() error = %v, want waiting loop ignored for conflict checks", err)
+	}
+}
+
 func TestHandlerWorkerCreateUsesProjectScopedPullRequestSnapshot(t *testing.T) {
 	fixture := newTestFixture(t)
 	seedWorkerPlannerArtifactsData(t, fixture.runtime, fixture.now)
@@ -1850,7 +1928,7 @@ func TestHandlerCreateLoopRejectsUnsupportedLoopStatus(t *testing.T) {
 	body := parseJSONMap(t, recorder.Body.Bytes())
 	errMap := body["error"].(map[string]any)
 	assertEqual(t, errMap["code"], "VALIDATION_FAILED")
-	assertEqual(t, errMap["message"], "loop.status must be one of: idle, queued, running, paused, completed, failed, interrupted")
+	assertEqual(t, errMap["message"], "loop.status must be one of: idle, queued, running, paused, waiting, stopped, terminated, completed, failed, interrupted")
 
 	loops, err := fixture.runtime.Services().Repositories.Loops.List(context.Background())
 	if err != nil {
@@ -1979,6 +2057,9 @@ func TestHandlerCreateLoopReviewerEnqueuesSchedulableManualLoop(t *testing.T) {
 	metadata := parseJSONObject(loop.MetadataJSON)
 	assertEqual(t, metadata["manual"], true)
 	assertEqual(t, metadata["followUpdates"], false)
+	loopMeta := metadata["loop"].(map[string]any)
+	assertEqual(t, loopMeta["enabled"], false)
+	assertEqual(t, loopMeta["startTime"], fixture.now.Add(time.Minute).UTC().Format(javaScriptISOString))
 
 	queueItems, err := fixture.runtime.Services().Repositories.Queue.List(context.Background())
 	if err != nil {
@@ -1999,6 +2080,32 @@ func TestHandlerCreateLoopReviewerEnqueuesSchedulableManualLoop(t *testing.T) {
 	assertEqual(t, queue.TargetType, "pull_request")
 	assertEqual(t, queue.TargetID, "pr:acme/looper:99")
 	assertEqual(t, queue.DedupeKey, "reviewer:project_1:"+loopID+":acme/looper:99")
+}
+
+func TestHandlerCreateLoopReviewerBackfillsFollowUpdatesFromLoopEnabled(t *testing.T) {
+	fixture := newTestFixture(t)
+	seedWorkerPlannerArtifactsData(t, fixture.runtime, fixture.now)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/loops", bytes.NewReader([]byte(`{"projectId":"project_1","type":"reviewer","targetType":"pull_request","repo":"acme/looper","prNumber":99,"metadata":{"loop":{"enabled":false}}}`)))
+	req.Header.Set("content-type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	NewHandler(Context{Config: fixture.config, Runtime: fixture.runtime, Now: func() time.Time { return fixture.now }}).ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+	data := parseJSONMap(t, recorder.Body.Bytes())["data"].(map[string]any)
+	loopID := data["id"].(string)
+	loop, err := fixture.runtime.Services().Repositories.Loops.GetByID(context.Background(), loopID)
+	if err != nil || loop == nil {
+		t.Fatalf("Loops.GetByID() = (%#v, %v), want loop", loop, err)
+	}
+	metadata := parseJSONObject(loop.MetadataJSON)
+	assertEqual(t, metadata["followUpdates"], false)
+	loopMeta := metadata["loop"].(map[string]any)
+	assertEqual(t, loopMeta["enabled"], false)
+	assertEqual(t, loopMeta["startTime"], fixture.now.UTC().Format(javaScriptISOString))
 }
 
 func TestHandlerCreateLoopReviewerEnqueuesAcrossProjectsForSamePullRequest(t *testing.T) {
@@ -4184,6 +4291,24 @@ func seedStatusData(t *testing.T, rt *looperdruntime.Runtime) {
 		UpdatedAt:   nowISO,
 	}); err != nil {
 		t.Fatalf("Queue.Upsert() error = %v", err)
+	}
+}
+
+func seedStatusLoopCounts(t *testing.T, rt *looperdruntime.Runtime) {
+	t.Helper()
+
+	services := rt.Services()
+	nowISO := "2026-04-11T12:00:00.000Z"
+	projectID := "project_1"
+	for _, seededLoop := range []storage.LoopRecord{
+		{ID: "loop_queued", Seq: 2, ProjectID: projectID, Type: "reviewer", TargetType: "pull_request", TargetID: stringPtr("pr:acme/looper:43"), Repo: stringPtr("acme/looper"), PRNumber: int64Ptr(43), Status: "queued", CreatedAt: nowISO, UpdatedAt: nowISO},
+		{ID: "loop_waiting", Seq: 3, ProjectID: projectID, Type: "reviewer", TargetType: "pull_request", TargetID: stringPtr("pr:acme/looper:44"), Repo: stringPtr("acme/looper"), PRNumber: int64Ptr(44), Status: "waiting", CreatedAt: nowISO, UpdatedAt: nowISO},
+		{ID: "loop_terminated", Seq: 4, ProjectID: projectID, Type: "reviewer", TargetType: "pull_request", TargetID: stringPtr("pr:acme/looper:45"), Repo: stringPtr("acme/looper"), PRNumber: int64Ptr(45), Status: "terminated", CreatedAt: nowISO, UpdatedAt: nowISO},
+		{ID: "loop_stopped", Seq: 5, ProjectID: projectID, Type: "reviewer", TargetType: "pull_request", TargetID: stringPtr("pr:acme/looper:46"), Repo: stringPtr("acme/looper"), PRNumber: int64Ptr(46), Status: "stopped", CreatedAt: nowISO, UpdatedAt: nowISO},
+	} {
+		if err := services.Repositories.Loops.Upsert(context.Background(), seededLoop); err != nil {
+			t.Fatalf("Loops.Upsert(%s) error = %v", seededLoop.ID, err)
+		}
 	}
 }
 

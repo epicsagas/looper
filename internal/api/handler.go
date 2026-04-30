@@ -568,9 +568,13 @@ type statusScheduler struct {
 }
 
 type statusLoopType struct {
-	Running int `json:"running"`
-	Paused  int `json:"paused"`
-	Failed  int `json:"failed"`
+	Queued     int `json:"queued"`
+	Running    int `json:"running"`
+	Waiting    int `json:"waiting"`
+	Paused     int `json:"paused"`
+	Failed     int `json:"failed"`
+	Terminated int `json:"terminated"`
+	Stopped    int `json:"stopped"`
 }
 
 type statusLoops struct {
@@ -611,6 +615,7 @@ type configResponse struct {
 	Daemon        configDaemonResponse      `json:"daemon"`
 	Package       config.PackageConfig      `json:"package"`
 	Defaults      config.DefaultsConfig     `json:"defaults"`
+	Reviewer      config.ReviewerConfig     `json:"reviewer"`
 	Projects      []config.ProjectRefConfig `json:"projects"`
 }
 
@@ -656,6 +661,7 @@ func (h *Handler) buildConfigResponse() configResponse {
 		},
 		Package:  cfg.Package,
 		Defaults: cfg.Defaults,
+		Reviewer: cfg.Reviewer,
 		Projects: append([]config.ProjectRefConfig{}, cfg.Projects...),
 	}
 }
@@ -810,12 +816,20 @@ func countLoops(loops []storage.LoopRecord) statusLoops {
 		}
 
 		switch loop.Status {
+		case "queued":
+			target.Queued++
 		case "running":
 			target.Running++
+		case "waiting":
+			target.Waiting++
 		case "paused":
 			target.Paused++
 		case "failed":
 			target.Failed++
+		case "terminated":
+			target.Terminated++
+		case "stopped":
+			target.Stopped++
 		}
 	}
 
@@ -2518,8 +2532,15 @@ func (h *Handler) buildCreateLoopResponse(r *http.Request) (loopResponse, error)
 			return loopResponse{}, err
 		}
 	}
-
 	now := h.now().UTC()
+	nowISO := eventlog.FormatJavaScriptISOString(now)
+	if domain.LoopType(loopType) == domain.LoopTypeReviewer {
+		metadataJSON, err = reviewerLoopMetadataJSON(metadataJSON, h.context.Config.Reviewer, target, nowISO)
+		if err != nil {
+			return loopResponse{}, err
+		}
+	}
+
 	record, err := storage.WithTransactionValue(r.Context(), services.Coordinator.DB(), nil, func(tx *sql.Tx) (storage.LoopRecord, error) {
 		transactionRepos := storage.NewRepositories(tx)
 		project, err := transactionRepos.Projects.GetByID(r.Context(), projectID)
@@ -2547,7 +2568,6 @@ func (h *Handler) buildCreateLoopResponse(r *http.Request) (loopResponse, error)
 			return storage.LoopRecord{}, err
 		}
 
-		nowISO := eventlog.FormatJavaScriptISOString(now)
 		record := storage.LoopRecord{
 			ID:           generateRequestID(),
 			Seq:          seq,
@@ -3218,6 +3238,9 @@ func (h *Handler) mutateLoopStatus(ctx context.Context, loopID string, status do
 		if status == domain.LoopStatusRunning && (loop.Type == string(domain.LoopTypeReviewer) || loop.Type == string(domain.LoopTypeFixer) || loop.Type == string(domain.LoopTypeWorker) || loop.Type == string(domain.LoopTypePlanner)) && !isCodingAgentConfigured(h.context.Config) {
 			return storage.LoopRecord{}, apiError{code: pkgapi.ErrorCodeAgentNotConfigured, status: http.StatusBadRequest, message: fmt.Sprintf("Cannot start %s loop without config.agent.vendor", loop.Type)}
 		}
+		if status == domain.LoopStatusRunning && loop.Type == string(domain.LoopTypeReviewer) && isTerminalReviewerLoopRecord(*loop) {
+			return storage.LoopRecord{}, apiError{code: pkgapi.ErrorCodeValidationFailed, status: http.StatusBadRequest, message: fmt.Sprintf("Cannot start terminal reviewer loop: %s", loop.ID)}
+		}
 
 		if status == domain.LoopStatusRunning {
 			target, targetErr := loopTargetFromRecordCompat(*loop)
@@ -3496,6 +3519,60 @@ func manualPlannerMetadataJSON(existing *string, issueNumber int64) (*string, er
 	return &text, nil
 }
 
+func reviewerLoopMetadataJSON(existing *string, reviewerConfig config.ReviewerConfig, target domain.LoopTarget, nowISO string) (*string, error) {
+	metadata := parseJSONObject(existing)
+	loopMeta, _ := metadata["loop"].(map[string]any)
+	if loopMeta == nil {
+		loopMeta = map[string]any{}
+	}
+	if _, ok := metadata["followUpdates"].(bool); !ok {
+		if enabled, ok := loopMeta["enabled"].(bool); ok {
+			metadata["followUpdates"] = enabled
+		} else {
+			metadata["followUpdates"] = reviewerConfig.Loop.EnabledByDefault
+		}
+	}
+	if _, ok := loopMeta["enabled"].(bool); !ok {
+		loopMeta["enabled"] = metadata["followUpdates"]
+	}
+	if _, ok := loopMeta["status"].(string); !ok {
+		loopMeta["status"] = "active"
+	}
+	if _, ok := loopMeta["startTime"].(string); !ok {
+		loopMeta["startTime"] = nowISO
+	}
+	loopMeta["scope"] = string(reviewerConfig.Scope)
+	loopMeta["quietPeriodSeconds"] = reviewerConfig.Loop.QuietPeriodSeconds
+	loopMeta["maxIterationsPerPR"] = reviewerConfig.Loop.MaxIterationsPerPR
+	loopMeta["maxIterationsPerHead"] = reviewerConfig.Loop.MaxIterationsPerHead
+	loopMeta["maxWallClockSeconds"] = reviewerConfig.Loop.MaxWallClockSeconds
+	loopMeta["maxConsecutiveFailures"] = reviewerConfig.Loop.MaxConsecutiveFailures
+	loopMeta["maxAgentExecutionsPerPR"] = reviewerConfig.Loop.MaxAgentExecutionsPerPR
+	if target.Repo != "" {
+		loopMeta["repo"] = target.Repo
+	}
+	if target.PRNumber > 0 {
+		loopMeta["prNumber"] = target.PRNumber
+	}
+	metadata["loop"] = loopMeta
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, err
+	}
+	text := string(encoded)
+	return &text, nil
+}
+
+func isTerminalReviewerLoopRecord(loop storage.LoopRecord) bool {
+	if loop.Status == "terminated" || loop.Status == "stopped" || loop.Status == "failed" {
+		return true
+	}
+	metadata := parseJSONObject(loop.MetadataJSON)
+	loopMeta, _ := metadata["loop"].(map[string]any)
+	status, _ := loopMeta["status"].(string)
+	return status == "terminated" || status == "stopped" || status == "failed"
+}
+
 func buildQueuedLoopQueueRecordCompat(record storage.LoopRecord, target domain.LoopTarget, nowISO string, metadataJSON *string, maxAttempts int64) (storage.QueueItemRecord, bool, error) {
 	queueType := domain.LoopType(record.Type)
 	if queueType != domain.LoopTypeReviewer && queueType != domain.LoopTypeFixer && queueType != domain.LoopTypeWorker && queueType != domain.LoopTypePlanner {
@@ -3666,12 +3743,12 @@ func loopTargetKeyCompat(target domain.LoopTarget) string {
 }
 
 func assertUniqueActiveLoopCompat(existing []storage.LoopRecord, candidateID, projectID string, loopType domain.LoopType, target domain.LoopTarget, status domain.LoopStatus) error {
-	if !domain.IsActiveLoopStatus(status) {
+	if !domain.IsConflictingActiveLoopStatus(status) {
 		return nil
 	}
 
 	for _, loop := range existing {
-		if loop.ID == candidateID || !domain.IsActiveLoopStatus(domain.LoopStatus(loop.Status)) {
+		if loop.ID == candidateID || !domain.IsConflictingActiveLoopStatus(domain.LoopStatus(loop.Status)) {
 			continue
 		}
 
