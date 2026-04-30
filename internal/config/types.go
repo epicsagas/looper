@@ -132,6 +132,7 @@ type LoggingConfig struct {
 type ToolPathsConfig struct {
 	GitPath       *string `json:"gitPath,omitempty"`
 	GHPath        *string `json:"ghPath,omitempty"`
+	LooperPath    *string `json:"looperPath,omitempty"`
 	OsascriptPath *string `json:"osascriptPath,omitempty"`
 }
 
@@ -277,6 +278,7 @@ type PartialLoggingConfig struct {
 type PartialToolPathsConfig struct {
 	GitPath       *string `json:"gitPath,omitempty"`
 	GHPath        *string `json:"ghPath,omitempty"`
+	LooperPath    *string `json:"looperPath,omitempty"`
 	OsascriptPath *string `json:"osascriptPath,omitempty"`
 }
 

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/powerformer/looper/internal/diffanchor"
 	"github.com/powerformer/looper/internal/infra/shell"
 	"github.com/powerformer/looper/internal/infra/specpr"
 	"github.com/powerformer/looper/internal/storage"
@@ -119,6 +120,7 @@ type SubmitReviewInput struct {
 	Body     string
 	CommitID string
 	Comments []ReviewComment
+	Anchors  *diffanchor.Index
 	CWD      string
 }
 
@@ -468,6 +470,18 @@ func (g *Gateway) ViewPullRequest(ctx context.Context, input ViewPullRequestInpu
 	}, nil
 }
 
+func (g *Gateway) GetPullRequestHeadSHA(ctx context.Context, input ViewPullRequestInput) (string, error) {
+	result, err := g.runGh(ctx, input.CWD, "", "pr", "view", fmt.Sprintf("%d", input.PRNumber), "--repo", input.Repo, "--json", "headRefOid")
+	if err != nil {
+		return "", err
+	}
+	row, err := decodeJSONObject(result.Stdout)
+	if err != nil {
+		return "", err
+	}
+	return asString(row["headRefOid"]), nil
+}
+
 func (g *Gateway) ResolveReviewThread(ctx context.Context, input ResolveReviewThreadInput) error {
 	thread, err := g.getReviewThread(ctx, input.ThreadID, input.CWD)
 	if err != nil {
@@ -514,33 +528,47 @@ func (g *Gateway) GetPullRequestDiff(ctx context.Context, input GetPullRequestDi
 }
 
 func (g *Gateway) SubmitReview(ctx context.Context, input SubmitReviewInput) error {
-	if len(input.Comments) > 0 {
+	if marker, ok := findReviewIdempotencyMarker(input.Body, ""); ok && marker.Outcome == "clean" && len(input.Comments) > 0 {
+		return fmt.Errorf("clean review marker cannot be submitted with review comments")
+	}
+	var flags []reviewQualityFlag
+	input.Body, input.Comments, flags = normalizeReviewAnchors(input.Body, input.Comments, input.Anchors)
+	gateApplies, err := reviewQualityGateApplies(input.Event, input.Body)
+	if err != nil {
+		return err
+	}
+	if gateApplies && len(flags) > 0 {
+		return fmt.Errorf("review quality gate failed: %s", formatReviewQualityFlags(flags))
+	}
+	if len(input.Comments) > 0 || strings.TrimSpace(input.CommitID) != "" {
 		payload := map[string]any{
 			"event":     input.Event,
 			"body":      emptyToNil(input.Body),
 			"commit_id": emptyToNil(input.CommitID),
 		}
-		comments := make([]map[string]any, 0, len(input.Comments))
-		for _, comment := range input.Comments {
-			row := map[string]any{"body": comment.Body}
-			if comment.Path != "" {
-				row["path"] = comment.Path
+		if len(input.Comments) > 0 {
+			comments := make([]map[string]any, 0, len(input.Comments))
+			for _, comment := range input.Comments {
+				row := map[string]any{"body": comment.Body}
+				if comment.Path != "" {
+					row["path"] = comment.Path
+				}
+				if comment.Line > 0 {
+					row["line"] = comment.Line
+				}
+				if comment.Side != "" {
+					row["side"] = comment.Side
+				}
+				if comment.StartLine > 0 {
+					row["start_line"] = comment.StartLine
+				}
+				if comment.StartSide != "" {
+					row["start_side"] = comment.StartSide
+				}
+				comments = append(comments, row)
 			}
-			if comment.Line > 0 {
-				row["line"] = comment.Line
-			}
-			if comment.Side != "" {
-				row["side"] = comment.Side
-			}
-			if comment.StartLine > 0 {
-				row["start_line"] = comment.StartLine
-			}
-			if comment.StartSide != "" {
-				row["start_side"] = comment.StartSide
-			}
-			comments = append(comments, row)
+			payload["comments"] = comments
 		}
-		payload["comments"] = comments
 		body, err := json.Marshal(payload)
 		if err != nil {
 			return fmt.Errorf("marshal gh review payload: %w", err)
@@ -552,7 +580,7 @@ func (g *Gateway) SubmitReview(ctx context.Context, input SubmitReviewInput) err
 	if input.Body != "" {
 		args = append(args, "--body", input.Body)
 	}
-	_, err := g.runGh(ctx, input.CWD, "", args...)
+	_, err = g.runGh(ctx, input.CWD, "", args...)
 	return err
 }
 
@@ -616,8 +644,8 @@ func findAllowedReviewMarker(raw string, marker string, allowedReviewEvents []st
 	if err := json.Unmarshal([]byte(raw), &rows); err != nil {
 		var pages [][]map[string]any
 		if err := json.Unmarshal([]byte(raw), &pages); err != nil {
-			if expectedAuthorLogin == "" && len(allowedReviewEvents) == 0 && strings.Contains(raw, marker) {
-				return ReviewMarkerResult{Found: true, Outcome: reviewMarkerOutcome(raw, marker), Body: raw}
+			if parsedMarker, ok := findReviewIdempotencyMarker(raw, marker); expectedAuthorLogin == "" && len(allowedReviewEvents) == 0 && ok {
+				return ReviewMarkerResult{Found: true, Outcome: parsedMarker.Outcome, Body: raw}
 			}
 			return ReviewMarkerResult{}
 		}
@@ -628,7 +656,11 @@ func findAllowedReviewMarker(raw string, marker string, allowedReviewEvents []st
 	var newest ReviewMarkerResult
 	for _, row := range rows {
 		body, ok := row["body"].(string)
-		if !ok || !strings.Contains(body, marker) {
+		if !ok {
+			continue
+		}
+		parsedMarker, ok := findReviewIdempotencyMarker(body, marker)
+		if !ok {
 			continue
 		}
 		author := reviewAuthorLogin(row)
@@ -637,7 +669,7 @@ func findAllowedReviewMarker(raw string, marker string, allowedReviewEvents []st
 		}
 		event := reviewEventFromStateString(row["state"])
 		if len(allowedReviewEvents) == 0 || reviewEventAllowed(event, allowedReviewEvents) {
-			newest = ReviewMarkerResult{Found: true, Outcome: reviewMarkerOutcome(body, marker), Event: event, AuthorLogin: author, Body: body, ReviewID: reviewIDString(row)}
+			newest = ReviewMarkerResult{Found: true, Outcome: parsedMarker.Outcome, Event: event, AuthorLogin: author, Body: body, ReviewID: reviewIDString(row)}
 		}
 	}
 	return newest
@@ -664,19 +696,71 @@ func normalizeReviewMarkerLogin(login string) string {
 }
 
 func reviewMarkerOutcome(body string, marker string) string {
-	idx := strings.Index(body, marker)
-	if idx < 0 {
-		return ""
-	}
-	segment := body[idx:]
-	if end := strings.Index(segment, "-->"); end >= 0 {
-		segment = segment[:end]
-	}
-	matches := regexp.MustCompile(`\boutcome=(clean|actionable)\b`).FindStringSubmatch(segment)
-	if len(matches) == 2 {
-		return matches[1]
+	if parsedMarker, ok := findReviewIdempotencyMarker(body, marker); ok {
+		return parsedMarker.Outcome
 	}
 	return ""
+}
+
+type reviewIdempotencyMarker struct {
+	ID      string
+	Head    string
+	Outcome string
+}
+
+var reviewMarkerRE = regexp.MustCompile(`<!--\s*looper:review\s+([^>]*)-->`)
+
+func findReviewIdempotencyMarker(body string, marker string) (reviewIdempotencyMarker, bool) {
+	marker = strings.TrimSpace(marker)
+	for _, parsedMarker := range parseReviewIdempotencyMarkers(body) {
+		if marker == "" || parsedMarker.matches(marker) {
+			return parsedMarker, true
+		}
+	}
+	return reviewIdempotencyMarker{}, false
+}
+
+func parseReviewIdempotencyMarkers(body string) []reviewIdempotencyMarker {
+	matches := reviewMarkerRE.FindAllStringSubmatch(body, -1)
+	markers := make([]reviewIdempotencyMarker, 0, len(matches))
+	for _, match := range matches {
+		if len(match) != 2 {
+			continue
+		}
+		fields := parseReviewMarkerFields(match[1])
+		parsedMarker := reviewIdempotencyMarker{ID: fields["id"], Head: fields["head"], Outcome: fields["outcome"]}
+		if parsedMarker.ID == "" || parsedMarker.Head == "" || (parsedMarker.Outcome != "clean" && parsedMarker.Outcome != "actionable") {
+			continue
+		}
+		markers = append(markers, parsedMarker)
+	}
+	return markers
+}
+
+func parseReviewMarkerFields(segment string) map[string]string {
+	fields := map[string]string{}
+	for _, field := range strings.Fields(segment) {
+		key, value, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		fields[strings.ToLower(strings.TrimSpace(key))] = strings.TrimSpace(value)
+	}
+	return fields
+}
+
+func (m reviewIdempotencyMarker) matches(marker string) bool {
+	fields := parseReviewMarkerFields(strings.TrimPrefix(marker, "looper:review"))
+	if id := fields["id"]; id != "" && id != m.ID {
+		return false
+	}
+	if head := fields["head"]; head != "" && head != m.Head {
+		return false
+	}
+	if outcome := fields["outcome"]; outcome != "" && outcome != m.Outcome {
+		return false
+	}
+	return strings.HasPrefix(marker, "looper:review") || strings.Contains(marker, "id=") || strings.Contains(marker, "head=") || strings.Contains(marker, "outcome=")
 }
 
 func reviewStateAllowed(raw any, allowedReviewEvents []string) bool {
