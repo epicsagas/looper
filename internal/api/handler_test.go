@@ -408,7 +408,7 @@ func TestHandlerMatchesFrozenErrorArtifactForStatusRoutes(t *testing.T) {
 		Cases []errorArtifactCase `json:"cases"`
 	}
 
-	artifactPath := filepath.Join("..", "..", "specs", "2026-04-17-go-port-plan", "artifacts", "daemon-http.errors.compat.json")
+	artifactPath := filepath.Join("testdata", "contracts", "daemon-http.errors.compat.json")
 	raw, err := os.ReadFile(artifactPath)
 	if err != nil {
 		t.Fatalf("ReadFile(%s) error = %v", artifactPath, err)
@@ -545,7 +545,7 @@ func TestHandlerEventAndPullRequestRouteErrorsMatchArtifactCases(t *testing.T) {
 	fixture := newTestFixture(t)
 	seedEventAndPullRequestRouteData(t, fixture.runtime)
 
-	artifactPath := filepath.Join("..", "..", "specs", "2026-04-17-go-port-plan", "artifacts", "daemon-http.errors.compat.json")
+	artifactPath := filepath.Join("testdata", "contracts", "daemon-http.errors.compat.json")
 	raw, err := os.ReadFile(artifactPath)
 	if err != nil {
 		t.Fatalf("ReadFile(%s) error = %v", artifactPath, err)
@@ -791,7 +791,7 @@ func TestHandlerProjectsRemoveRouteReturnsNotFound(t *testing.T) {
 func TestHandlerProjectsRouteErrorsMatchArtifactCases(t *testing.T) {
 	fixture := newTestFixture(t)
 
-	artifactPath := filepath.Join("..", "..", "specs", "2026-04-17-go-port-plan", "artifacts", "daemon-http.errors.compat.json")
+	artifactPath := filepath.Join("testdata", "contracts", "daemon-http.errors.compat.json")
 	raw, err := os.ReadFile(artifactPath)
 	if err != nil {
 		t.Fatalf("ReadFile(%s) error = %v", artifactPath, err)
@@ -949,7 +949,7 @@ func TestHandlerLoopRouteErrorsMatchArtifactCases(t *testing.T) {
 	fixture := newTestFixture(t)
 	seedLoopRouteData(t, fixture.runtime)
 
-	artifactPath := filepath.Join("..", "..", "specs", "2026-04-17-go-port-plan", "artifacts", "daemon-http.errors.compat.json")
+	artifactPath := filepath.Join("testdata", "contracts", "daemon-http.errors.compat.json")
 	raw, err := os.ReadFile(artifactPath)
 	if err != nil {
 		t.Fatalf("ReadFile(%s) error = %v", artifactPath, err)
@@ -1494,7 +1494,7 @@ func TestHandlerWorkerRouteErrorsMatchArtifactCases(t *testing.T) {
 	seedLoopRouteData(t, fixture.runtime)
 	seedWorkerPlannerArtifactsData(t, fixture.runtime, fixture.now)
 
-	artifactPath := filepath.Join("..", "..", "specs", "2026-04-17-go-port-plan", "artifacts", "daemon-http.errors.compat.json")
+	artifactPath := filepath.Join("testdata", "contracts", "daemon-http.errors.compat.json")
 	raw, err := os.ReadFile(artifactPath)
 	if err != nil {
 		t.Fatalf("ReadFile(%s) error = %v", artifactPath, err)
@@ -3539,7 +3539,7 @@ func TestHandlerRunRouteErrorsMatchArtifactCases(t *testing.T) {
 	fixture := newTestFixture(t)
 	seedRunRouteData(t, fixture.runtime)
 
-	artifactPath := filepath.Join("..", "..", "specs", "2026-04-17-go-port-plan", "artifacts", "daemon-http.errors.compat.json")
+	artifactPath := filepath.Join("testdata", "contracts", "daemon-http.errors.compat.json")
 	raw, err := os.ReadFile(artifactPath)
 	if err != nil {
 		t.Fatalf("ReadFile(%s) error = %v", artifactPath, err)
@@ -4479,7 +4479,7 @@ func parseJSONValue(t *testing.T, body []byte) any {
 func loadResponseArtifact(t *testing.T) []responseArtifactRoute {
 	t.Helper()
 
-	artifactPath := filepath.Join("..", "..", "specs", "2026-04-17-go-port-plan", "artifacts", "daemon-http.responses.compat.json")
+	artifactPath := filepath.Join("testdata", "contracts", "daemon-http.responses.compat.json")
 	raw, err := os.ReadFile(artifactPath)
 	if err != nil {
 		t.Fatalf("ReadFile(%s) error = %v", artifactPath, err)
@@ -4498,7 +4498,7 @@ func loadResponseArtifact(t *testing.T) []responseArtifactRoute {
 func loadRequestArtifact(t *testing.T) []requestArtifactRoute {
 	t.Helper()
 
-	artifactPath := filepath.Join("..", "..", "specs", "2026-04-17-go-port-plan", "artifacts", "daemon-http.requests.compat.json")
+	artifactPath := filepath.Join("testdata", "contracts", "daemon-http.requests.compat.json")
 	raw, err := os.ReadFile(artifactPath)
 	if err != nil {
 		t.Fatalf("ReadFile(%s) error = %v", artifactPath, err)
