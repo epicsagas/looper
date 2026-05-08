@@ -14,21 +14,21 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/powerformer/looper/internal/bootstrap"
-	"github.com/powerformer/looper/internal/config"
-	"github.com/powerformer/looper/internal/domain"
-	gitinfra "github.com/powerformer/looper/internal/infra/git"
-	githubinfra "github.com/powerformer/looper/internal/infra/github"
-	"github.com/powerformer/looper/internal/infra/specpr"
-	"github.com/powerformer/looper/internal/loops"
-	"github.com/powerformer/looper/internal/projects"
-	"github.com/powerformer/looper/internal/runs"
-	"github.com/powerformer/looper/internal/storage"
+	"github.com/nexu-io/looper/internal/bootstrap"
+	"github.com/nexu-io/looper/internal/config"
+	"github.com/nexu-io/looper/internal/domain"
+	gitinfra "github.com/nexu-io/looper/internal/infra/git"
+	githubinfra "github.com/nexu-io/looper/internal/infra/github"
+	"github.com/nexu-io/looper/internal/infra/specpr"
+	"github.com/nexu-io/looper/internal/loops"
+	"github.com/nexu-io/looper/internal/projects"
+	"github.com/nexu-io/looper/internal/runs"
+	"github.com/nexu-io/looper/internal/storage"
 )
 
 type OpenSQLiteCoordinatorFunc func(context.Context, string, storage.SQLiteCoordinatorOptions) (*storage.SQLiteCoordinator, error)
 
-type SyncConfiguredProjectsFunc func(context.Context, *storage.Repositories, config.Config, time.Time) error
+type SyncConfiguredProjectsFunc func(context.Context, *projects.Service, config.Config, time.Time) error
 
 type RunSchedulerTickFunc func(context.Context, Services) error
 
@@ -348,7 +348,7 @@ func (r *Runtime) start(ctx context.Context) error {
 	loopService := &loops.Service{DB: coordinator.DB(), Repos: repositories, Now: r.now}
 	runService := &runs.Service{DB: coordinator.DB(), Repos: repositories, Loops: loopService, Now: r.now}
 	startedAt := r.now().UTC()
-	if err := r.syncConfiguredProjects(ctx, repositories, r.config, startedAt); err != nil {
+	if err := r.syncConfiguredProjects(ctx, projectService, r.config, startedAt); err != nil {
 		return err
 	}
 	recoverySummary, err := r.runRecoveryPipeline(ctx, repositories, nil, startedAt)
@@ -1090,8 +1090,10 @@ func (r *Runtime) appendStoppedEvent(ctx context.Context, repositories *storage.
 	})
 }
 
-func defaultSyncConfiguredProjects(ctx context.Context, repositories *storage.Repositories, cfg config.Config, now time.Time) error {
-	service := &projects.Service{Repos: repositories, Now: func() time.Time { return now }}
+func defaultSyncConfiguredProjects(ctx context.Context, service *projects.Service, cfg config.Config, now time.Time) error {
+	if service == nil {
+		return fmt.Errorf("projects service is not configured")
+	}
 	return service.SyncConfigured(ctx, cfg, now)
 }
 
