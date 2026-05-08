@@ -35,6 +35,7 @@ var configFieldRegistry = map[string]configField{
 	"defaults.fixAllPullRequests": boolField("defaults.fixAllPullRequests", "LOOPER_FIX_ALL_PULL_REQUESTS", "fix-all-pull-requests", func(c config.Config) any { return c.Defaults.FixAllPullRequests }, func(p *config.PartialConfig) **bool { return &ensurePartialDefaults(p).FixAllPullRequests }),
 	"defaults.openPrStrategy":     openPRStrategyField(),
 	"instructions.enabled":        boolField("instructions.enabled", "", "no-custom-instructions", func(c config.Config) any { return c.Instructions.Enabled }, func(p *config.PartialConfig) **bool { return &ensurePartialInstructions(p).Enabled }),
+	"package.autoUpgradeEnabled":  boolField("package.autoUpgradeEnabled", "LOOPER_AUTO_UPGRADE_ENABLED", "no-auto-upgrade", func(c config.Config) any { return c.Package.AutoUpgradeEnabled }, func(p *config.PartialConfig) **bool { return &ensurePartialPackage(p).AutoUpgradeEnabled }),
 	"instructions.maxBytes":       positiveIntField("instructions.maxBytes", "", "", func(c config.Config) any { return c.Instructions.MaxBytes }, func(p *config.PartialConfig) **int { return &ensurePartialInstructions(p).MaxBytes }),
 	"reviewer.reviewEvents.clean": reviewerReviewEventField("reviewer.reviewEvents.clean", "LOOPER_REVIEWER_REVIEW_EVENTS_CLEAN", "reviewer-clean-review-event", func(c config.Config) any { return c.Reviewer.ReviewEvents.Clean }, func(p *config.PartialConfig) **config.ReviewerReviewEvent {
 		return &ensurePartialReviewerReviewEvents(p).Clean
@@ -543,6 +544,13 @@ func ensurePartialInstructions(partial *config.PartialConfig) *config.PartialIns
 	return partial.Instructions
 }
 
+func ensurePartialPackage(partial *config.PartialConfig) *config.PartialPackageConfig {
+	if partial.Package == nil {
+		partial.Package = &config.PartialPackageConfig{}
+	}
+	return partial.Package
+}
+
 func ensurePartialRoles(partial *config.PartialConfig) *config.PartialRoleConfigs {
 	if partial.Roles == nil {
 		partial.Roles = &config.PartialRoleConfigs{}
@@ -666,6 +674,8 @@ func configFieldSet(partial config.PartialConfig, key string) bool {
 		return partial.Defaults.OpenPRStrategy != nil
 	case "instructions.enabled":
 		return partial.Instructions != nil && partial.Instructions.Enabled != nil
+	case "package.autoUpgradeEnabled":
+		return partial.Package != nil && partial.Package.AutoUpgradeEnabled != nil
 	case "instructions.maxBytes":
 		return partial.Instructions != nil && partial.Instructions.MaxBytes != nil
 	case "reviewer.reviewEvents.clean":

@@ -124,6 +124,126 @@ func TestDaemonStatusJSONUsesAPIVersionAndBinaryPath(t *testing.T) {
 	assertJSONContains(t, stdout.String(), "daemonBinaryPath", "/opt/looper/bin/looperd")
 }
 
+func TestDaemonStatusJSONIgnoresManagedProbeFailureWhenAPIAlreadyReportedVersion(t *testing.T) {
+	t.Parallel()
+
+	homeDir := t.TempDir()
+	managedPath := filepath.Join(homeDir, ".looper", "bin", "looperd")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/status":
+			writeEnvelope(t, w, pkgapi.Success("req_status", map[string]any{
+				"service": map[string]any{
+					"version": "0.6.0",
+					"binary": map[string]any{
+						"path": managedPath,
+					},
+				},
+			}))
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	configPath := writeDaemonCLIConfig(t, server.URL)
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	app := New(Deps{
+		Stdout:  stdout,
+		Stderr:  stderr,
+		HomeDir: homeDir,
+		RunCommand: func(ctx context.Context, command string, args []string, timeout time.Duration) (commandExecutionResult, error) {
+			_ = ctx
+			_ = timeout
+			if command == managedPath && strings.Join(args, " ") == "--version" {
+				return commandExecutionResult{ExitCode: 1, Stderr: "permission denied"}, nil
+			}
+			return commandExecutionResult{ExitCode: 1, Stderr: "not found"}, nil
+		},
+	})
+
+	exitCode := app.Run(context.Background(), []string{"daemon", "status", "--json", "--config", configPath})
+	if exitCode != 0 {
+		t.Fatalf("Run([daemon status --json]) exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("Run([daemon status --json]) stderr = %q, want empty string", stderr.String())
+	}
+	assertJSONContains(t, stdout.String(), "apiReachable", true)
+	assertJSONContains(t, stdout.String(), "daemonVersion", "0.6.0")
+	assertJSONContains(t, stdout.String(), "daemonVersionSource", "api")
+	assertJSONContains(t, stdout.String(), "daemonBinaryPath", managedPath)
+
+	var decoded map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("unmarshal stdout JSON: %v\nraw=%q", err, stdout.String())
+	}
+	if _, ok := decoded["managedDaemonVersion"]; ok {
+		t.Fatalf("stdout JSON unexpectedly included managedDaemonVersion: %#v", decoded)
+	}
+	if _, ok := decoded["managedDaemonBinaryPath"]; ok {
+		t.Fatalf("stdout JSON unexpectedly included managedDaemonBinaryPath: %#v", decoded)
+	}
+}
+
+func TestDaemonUpgradePendingRestart(t *testing.T) {
+	t.Parallel()
+
+	managedPath := "/tmp/.looper/bin/looperd"
+	otherPath := "/usr/local/bin/looperd"
+	for _, tc := range []struct {
+		name        string
+		lifecycle   daemonLifecycleStatus
+		running     *daemonVersionState
+		managed     *daemonVersionState
+		wantPending bool
+		wantVersion string
+	}{
+		{
+			name:        "running with different managed version",
+			lifecycle:   daemonLifecycleStatus{Process: "running"},
+			running:     &daemonVersionState{Version: "0.2.0", BinaryPath: stringPtr(managedPath)},
+			managed:     &daemonVersionState{Version: "0.3.0", BinaryPath: stringPtr(managedPath)},
+			wantPending: true,
+			wantVersion: "0.3.0",
+		},
+		{
+			name:        "stopped process",
+			lifecycle:   daemonLifecycleStatus{Process: "stopped"},
+			running:     &daemonVersionState{Version: "0.2.0", BinaryPath: stringPtr(managedPath)},
+			managed:     &daemonVersionState{Version: "0.3.0", BinaryPath: stringPtr(managedPath)},
+			wantPending: false,
+		},
+		{
+			name:        "mismatched binary paths",
+			lifecycle:   daemonLifecycleStatus{Process: "running"},
+			running:     &daemonVersionState{Version: "0.2.0", BinaryPath: stringPtr(otherPath)},
+			managed:     &daemonVersionState{Version: "0.3.0", BinaryPath: stringPtr(managedPath)},
+			wantPending: false,
+		},
+		{
+			name:        "same version",
+			lifecycle:   daemonLifecycleStatus{Process: "running"},
+			running:     &daemonVersionState{Version: "0.3.0", BinaryPath: stringPtr(managedPath)},
+			managed:     &daemonVersionState{Version: "0.3.0", BinaryPath: stringPtr(managedPath)},
+			wantPending: false,
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotPending, gotVersion := daemonUpgradePendingRestart(tc.lifecycle, tc.running, tc.managed)
+			if gotPending != tc.wantPending {
+				t.Fatalf("daemonUpgradePendingRestart() pending = %v, want %v", gotPending, tc.wantPending)
+			}
+			if got := derefString(gotVersion); got != tc.wantVersion {
+				t.Fatalf("daemonUpgradePendingRestart() version = %q, want %q", got, tc.wantVersion)
+			}
+		})
+	}
+}
+
 func TestDaemonStartWritesPIDFileAndPassesConfigArgs(t *testing.T) {
 	t.Parallel()
 
