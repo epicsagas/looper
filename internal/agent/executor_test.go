@@ -191,7 +191,7 @@ func TestExecutorStartSanitizesChildEnvAndUsesWorkingDirectory(t *testing.T) {
 	}
 
 	executor := New(ExecutorOptions{Config: ExecutorConfig{Vendor: config.AgentVendor("custom"), Params: map[string]any{"command": scriptPath}}})
-	execHandle, err := executor.Start(context.Background(), RunInput{ExecutionID: "agent_env", WorkingDirectory: workDir, Prompt: "ignored", Timeout: time.Second, Env: map[string]string{"OUTPUT_PATH": outputPath, "PWD": "/tmp/input-override", "GIT_DIR": "/tmp/input-git-dir", "OLDPWD": "/tmp/input-oldpwd"}})
+	execHandle, err := executor.Start(context.Background(), RunInput{ExecutionID: "agent_env", WorkingDirectory: workDir, Prompt: "ignored", Timeout: 5 * time.Second, Env: map[string]string{"OUTPUT_PATH": outputPath, "PWD": "/tmp/input-override", "GIT_DIR": "/tmp/input-git-dir", "OLDPWD": "/tmp/input-oldpwd"}})
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -283,7 +283,6 @@ func TestOnOutputRecomputesNativeSessionIDFromBufferedOutput(t *testing.T) {
 }
 
 func TestExecutorResumesPersistedNativeSession(t *testing.T) {
-	t.Parallel()
 
 	coordinator := openAgentCoordinator(t)
 	repos := storage.NewRepositories(coordinator.DB())
@@ -358,7 +357,6 @@ func TestExecutorResumesPersistedNativeSession(t *testing.T) {
 }
 
 func TestExecutorFallsBackAfterFailedNativeResumeAttempt(t *testing.T) {
-	t.Parallel()
 
 	coordinator := openAgentCoordinator(t)
 	repos := storage.NewRepositories(coordinator.DB())
@@ -434,7 +432,6 @@ func TestExecutorFallsBackAfterFailedNativeResumeAttempt(t *testing.T) {
 }
 
 func TestExecutorNativeResumeFailureAfterAttachDoesNotFallback(t *testing.T) {
-	t.Parallel()
 
 	coordinator := openAgentCoordinator(t)
 	repos := storage.NewRepositories(coordinator.DB())
