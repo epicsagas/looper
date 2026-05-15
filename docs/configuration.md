@@ -114,6 +114,78 @@ All role-specific config lives under `roles.<role>`.
 - discovery policy lives at `roles.<role>.discovery.*`
 - runtime behavior lives at `roles.<role>.behavior.*` when that split is useful for the role
 
+## Coordinator config reference
+
+Coordinator is the proactive, stateless issue-intake role. It owns both Triage and Dispatch. Triage writes `triaged` plus the coordinator-owned label namespace. Dispatch consumes `triaged` + `dispatch/*` and derives the actual trigger label from Planner or Worker config instead of redeclaring those labels.
+
+### Triage settings
+
+Coordinator triage lives under `roles.coordinator.triage.*`:
+
+| Path | Purpose | Default |
+| --- | --- | --- |
+| `roles.coordinator.enabled` | Turns Coordinator on for the project or globally | `false` |
+| `roles.coordinator.pollInterval` | Minimum delay between Coordinator ticks for the same project | `"5m"` |
+| `roles.coordinator.triage.triagedLabel` | Durability-commit label written last after comment posting succeeds | `"triaged"` |
+| `roles.coordinator.triage.maxIssueAgeDays` | Bootstrap guard for fresh issues only | `7` |
+| `roles.coordinator.triage.maxPerTick` | Per-tick cap on issues processed for triage | `5` |
+| `roles.coordinator.triage.disposition.outOfScopeLabel` | Label reused for `out-of-scope` | `"wontfix"` |
+| `roles.coordinator.triage.disposition.unclearLabel` | Label used for `unclear` | `"needs-info"` |
+| `roles.coordinator.triage.disposition.reTriageOnAuthorReply` | Re-opens the triage loop when the original author clarifies a `needs-info` issue | `true` |
+
+Coordinator clears and rewrites its own label namespace on each successful triage pass: `kind/*`, `area/*`, `complexity/*`, `dispatch/*`, `wontfix`, and `needs-info`. It then posts or edits the marker comment and writes `triaged` last.
+
+### Dispatch settings
+
+Coordinator dispatch lives under `roles.coordinator.dispatch.*`:
+
+| Path | Purpose | Default |
+| --- | --- | --- |
+| `roles.coordinator.dispatch.mode` | Chooses `human-gated` or `autonomous` dispatch | `"human-gated"` |
+| `roles.coordinator.dispatch.assignTo` | Optional GitHub assignee added before the trigger label commit | `""` |
+| `roles.coordinator.dispatch.humanGate.slashCommands` | Accepted start-of-line slash commands | `[`"/plan"`, `"/implement"`]` |
+| `roles.coordinator.dispatch.humanGate.allowedUsers` | Extra users allowed to dispatch even without repo write access | `[]` |
+| `roles.coordinator.dispatch.autonomous.delayMinutes` | Grace window after `triaged` before autonomous dispatch can commit | `30` |
+| `roles.coordinator.dispatch.autonomous.holdLabel` | Global hold / veto label for autonomous dispatch | `"looper:hold"` |
+
+Behavior notes:
+
+- `/plan` maps to the first planner trigger label at `roles.planner.triggers.labels[0]`
+- `/implement` maps to the first worker trigger label at `roles.worker.triggers.labels[0]`
+- autonomous mode uses the existing `dispatch/*` label to choose the same derived trigger labels
+- Coordinator never stores its own dispatch state; the authority chain stays on GitHub labels, comments, and timeline events
+- `roles.coordinator.dispatch.autonomous.holdLabel` is also a veto signal, alongside removing `dispatch/*` or manually applying the destination trigger label
+
+Coordinator example:
+
+```toml
+[roles.coordinator]
+enabled = true
+pollInterval = "5m"
+
+[roles.coordinator.triage]
+triagedLabel = "triaged"
+maxIssueAgeDays = 7
+maxPerTick = 5
+
+[roles.coordinator.triage.disposition]
+outOfScopeLabel = "wontfix"
+unclearLabel = "needs-info"
+reTriageOnAuthorReply = true
+
+[roles.coordinator.dispatch]
+mode = "human-gated"
+assignTo = ""
+
+[roles.coordinator.dispatch.humanGate]
+slashCommands = ["/plan", "/implement"]
+allowedUsers = []
+
+[roles.coordinator.dispatch.autonomous]
+delayMinutes = 30
+holdLabel = "looper:hold"
+```
+
 Reviewer is the main migration example:
 
 - legacy top-level `reviewer.*` is compatibility input only
@@ -301,10 +373,36 @@ addSnapshotMode = "async"
 # `allowAutoApprove` is a legacy compatibility alias.
 # Prefer `roles.reviewer.behavior.reviewEvents.clean = "APPROVE"` in new config.
 
+[roles.coordinator]
+enabled = false
+pollInterval = "5m"
+
+[roles.coordinator.triage]
+triagedLabel = "triaged"
+maxIssueAgeDays = 7
+maxPerTick = 5
+
+[roles.coordinator.triage.disposition]
+outOfScopeLabel = "wontfix"
+unclearLabel = "needs-info"
+reTriageOnAuthorReply = true
+
+[roles.coordinator.dispatch]
+mode = "human-gated"
+assignTo = ""
+
+[roles.coordinator.dispatch.humanGate]
+slashCommands = ["/plan", "/implement"]
+allowedUsers = []
+
+[roles.coordinator.dispatch.autonomous]
+delayMinutes = 30
+holdLabel = "looper:hold"
+
 [roles.planner.discovery]
 autoDiscovery = true
 
-[roles.planner.discovery.triggers]
+[roles.planner.triggers]
 labels = ["looper:plan"]
 labelMode = "all"
 requireAssigneeCurrentUser = true
@@ -355,7 +453,7 @@ labelMode = "all"
 [roles.worker.discovery]
 autoDiscovery = true
 
-[roles.worker.discovery.triggers]
+[roles.worker.triggers]
 labels = ["looper:worker-ready"]
 labelMode = "all"
 requireAssigneeCurrentUser = true
