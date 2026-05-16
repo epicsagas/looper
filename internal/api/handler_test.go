@@ -21,6 +21,7 @@ import (
 	"github.com/nexu-io/looper/internal/bootstrap"
 	"github.com/nexu-io/looper/internal/config"
 	"github.com/nexu-io/looper/internal/domain"
+	githubinfra "github.com/nexu-io/looper/internal/infra/github"
 	"github.com/nexu-io/looper/internal/projects"
 	looperdruntime "github.com/nexu-io/looper/internal/runtime"
 	"github.com/nexu-io/looper/internal/storage"
@@ -2958,6 +2959,40 @@ func TestSerializePullRequestListItemUsesProvidedLoopMatches(t *testing.T) {
 	}
 	if item.Reviewer == nil || *item.Reviewer != "running" {
 		t.Fatalf("Reviewer = %v, want running", item.Reviewer)
+	}
+}
+
+func TestSerializePullRequestListItemIncludesMergeabilityBlocker(t *testing.T) {
+	h := NewHandler(Context{})
+	detail, err := json.Marshal(githubinfra.PullRequestDetail{IsDraft: false, HasConflicts: true})
+	if err != nil {
+		t.Fatalf("Marshal(PullRequestDetail) error = %v", err)
+	}
+	payload := fmt.Sprintf(`{"detail":%s}`, detail)
+	checks := "SUCCESS"
+	review := "APPROVED"
+
+	item := h.serializePullRequestListItem("acme/looper", 42, &storage.PullRequestSnapshotRecord{
+		ID:            "snapshot_1",
+		ProjectID:     "project_1",
+		Repo:          "acme/looper",
+		PRNumber:      42,
+		HeadSHA:       "head-1",
+		PayloadJSON:   &payload,
+		ChecksSummary: &checks,
+		ReviewState:   &review,
+		CapturedAt:    "2026-04-11T12:00:00.000Z",
+		CreatedAt:     "2026-04-11T12:00:00.000Z",
+	}, nil)
+
+	if item.Mergeability == nil || *item.Mergeability != "blocked" {
+		t.Fatalf("Mergeability = %v, want blocked", item.Mergeability)
+	}
+	if item.BlockingReason == nil || *item.BlockingReason != "conflicts" {
+		t.Fatalf("BlockingReason = %v, want conflicts", item.BlockingReason)
+	}
+	if item.HasConflicts == nil || !*item.HasConflicts {
+		t.Fatalf("HasConflicts = %v, want true", item.HasConflicts)
 	}
 }
 
