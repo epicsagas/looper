@@ -3393,9 +3393,11 @@ func (r *Runner) enqueue(ctx context.Context, input enqueueInput) (storage.Queue
 				updated.AvailableAt = availableAt
 				updated.UpdatedAt = r.nowISO()
 				updated.PayloadJSON = &payloadJSON
-				if err := r.repos.Queue.Upsert(ctx, updated); err != nil {
+				persisted, _, err := r.repos.Queue.UpsertActiveByDedupeOrGetExisting(ctx, updated)
+				if err != nil {
 					return storage.QueueItemRecord{}, err
 				}
+				updated = persisted
 				r.wakeSchedulerAfterEnqueue()
 				return updated, nil
 			}
@@ -3411,11 +3413,14 @@ func (r *Runner) enqueue(ctx context.Context, input enqueueInput) (storage.Queue
 	if payloadJSON != "" {
 		queueItem.PayloadJSON = &payloadJSON
 	}
-	if err := r.repos.Queue.Upsert(ctx, queueItem); err != nil {
+	persisted, created, err := r.repos.Queue.CreateOrGetActiveByDedupe(ctx, queueItem)
+	if err != nil {
 		return storage.QueueItemRecord{}, err
 	}
-	r.wakeSchedulerAfterEnqueue()
-	return queueItem, nil
+	if created {
+		r.wakeSchedulerAfterEnqueue()
+	}
+	return persisted, nil
 }
 
 func (r *Runner) wakeSchedulerAfterEnqueue() {

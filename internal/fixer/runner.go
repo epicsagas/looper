@@ -3630,9 +3630,11 @@ func (r *Runner) enqueue(ctx context.Context, input enqueueInput) (storage.Queue
 			updated := *existing
 			updated.AvailableAt = availableAt
 			updated.UpdatedAt = r.nowISO()
-			if err := r.repos.Queue.Upsert(ctx, updated); err != nil {
+			persisted, _, err := r.repos.Queue.UpsertActiveByDedupeOrGetExisting(ctx, updated)
+			if err != nil {
 				return storage.QueueItemRecord{}, err
 			}
+			updated = persisted
 			r.wakeSchedulerAfterEnqueue()
 			return updated, nil
 		}
@@ -3650,9 +3652,11 @@ func (r *Runner) enqueue(ctx context.Context, input enqueueInput) (storage.Queue
 			updated.AvailableAt = availableAt
 			updated.PayloadJSON = &payload
 			updated.UpdatedAt = r.nowISO()
-			if err := r.repos.Queue.Upsert(ctx, updated); err != nil {
+			persisted, _, err := r.repos.Queue.UpsertActiveByDedupeOrGetExisting(ctx, updated)
+			if err != nil {
 				return storage.QueueItemRecord{}, err
 			}
+			updated = persisted
 			r.wakeSchedulerAfterEnqueue()
 			return updated, nil
 		}
@@ -3664,11 +3668,14 @@ func (r *Runner) enqueue(ctx context.Context, input enqueueInput) (storage.Queue
 	projectID := input.ProjectID
 	loopID := input.LoopID
 	queueItem := storage.QueueItemRecord{ID: eventlog.NewEventID("queue"), ProjectID: &projectID, LoopID: &loopID, Type: "fixer", TargetType: "pull_request", TargetID: targetID, Repo: &input.Repo, PRNumber: &input.PRNumber, DedupeKey: dedupeKey, Priority: storage.QueuePriorityFixer, Status: "queued", AvailableAt: availableAt, Attempts: 0, MaxAttempts: r.retryMaxAttempts, LockKey: &lockKey, PayloadJSON: &payload, CreatedAt: nowISO, UpdatedAt: nowISO}
-	if err := r.repos.Queue.Upsert(ctx, queueItem); err != nil {
+	persisted, created, err := r.repos.Queue.CreateOrGetActiveByDedupe(ctx, queueItem)
+	if err != nil {
 		return storage.QueueItemRecord{}, err
 	}
-	r.wakeSchedulerAfterEnqueue()
-	return queueItem, nil
+	if created {
+		r.wakeSchedulerAfterEnqueue()
+	}
+	return persisted, nil
 }
 
 func (r *Runner) wakeSchedulerAfterEnqueue() {
