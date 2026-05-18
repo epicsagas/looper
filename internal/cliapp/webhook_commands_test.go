@@ -60,6 +60,7 @@ func TestWebhookEnableWarnsWhenGHWebhookCommandIsUnavailable(t *testing.T) {
 	t.Parallel()
 
 	configPath := writeEditableCLIConfigWithPayload(t, map[string]any{
+		"tools": map[string]any{"ghPath": "/usr/bin/gh"},
 		"notifications": map[string]any{
 			"osascript": map[string]any{"enabled": false},
 		},
@@ -96,6 +97,7 @@ func TestWebhookEnableCanInstallGHWebhookExtension(t *testing.T) {
 	t.Parallel()
 
 	configPath := writeEditableCLIConfigWithPayload(t, map[string]any{
+		"tools": map[string]any{"ghPath": "/usr/bin/gh"},
 		"notifications": map[string]any{
 			"osascript": map[string]any{"enabled": false},
 		},
@@ -337,5 +339,273 @@ func TestWebhookStatusVerboseShowsRuntimeDetails(t *testing.T) {
 	}
 	if strings.Contains(stdout, "0x") {
 		t.Fatalf("stdout = %q, want pid value instead of pointer address", stdout)
+	}
+}
+
+func TestWebhookStatusShowsCleanupHintWhenDegraded(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/webhook/status" {
+			t.Fatalf("request path = %q, want %q", r.URL.Path, "/api/v1/webhook/status")
+		}
+		writeEnvelope(t, w, pkgapi.Success("req_webhook", map[string]any{
+			"enabled":                     true,
+			"listenerPath":                "/webhook/forward",
+			"endpointUrl":                 "http://127.0.0.1:17310/webhook/forward",
+			"fallbackPollIntervalSeconds": 300,
+			"degraded":                    true,
+			"degradedReasons":             []string{"forwarder for acme/looper exited: exit status 1"},
+			"queue":                       map[string]any{"pending": 0, "capacity": 8, "activeWorkers": 0},
+			"counters":                    map[string]any{"deliveriesReceived": 0, "coalesced": 0, "dropped": 0, "queued": 0, "processed": 0, "failed": 0},
+			"recentOutcomes":              []map[string]any{},
+			"forwarders":                  []map[string]any{{"repo": "acme/looper", "running": false, "restartCount": 2, "lastError": "exit status 1"}},
+		}))
+	}))
+	defer server.Close()
+
+	configPath := writeEditableCLIConfigWithPayload(t, map[string]any{
+		"webhook": map[string]any{"enabled": true, "fallbackPollIntervalSeconds": 300},
+		"server":  map[string]any{"baseUrl": server.URL, "authMode": "none"},
+		"notifications": map[string]any{
+			"osascript": map[string]any{"enabled": false},
+		},
+	})
+	exitCode, stdout, stderr := runApp(t, "webhook", "status", "--config", configPath)
+	if exitCode != 0 {
+		t.Fatalf("Run(webhook status) exit code = %d, want 0; stderr=%q", exitCode, stderr)
+	}
+	for _, needle := range []string{"Cleanup hint", "looper webhook cleanup acme/looper", "--confirm"} {
+		if !strings.Contains(stdout, needle) {
+			t.Fatalf("stdout = %q, want to contain %q", stdout, needle)
+		}
+	}
+}
+
+func TestWebhookCleanupDryRunListsMatchingCLIHooks(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeEditableCLIConfigWithPayload(t, map[string]any{
+		"notifications": map[string]any{
+			"osascript": map[string]any{"enabled": false},
+		},
+	})
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	commands := []string{}
+	app := New(Deps{
+		Stdout: stdout,
+		Stderr: stderr,
+		LookPath: func(command string) (string, error) {
+			if command == "gh" {
+				return "/usr/bin/gh", nil
+			}
+			return command, nil
+		},
+		RunCommand: func(ctx context.Context, command string, args []string, timeout time.Duration) (commandExecutionResult, error) {
+			commands = append(commands, command+" "+strings.Join(args, " "))
+			return commandExecutionResult{Stdout: `[
+				[
+					{"id":101,"name":"cli","type":"Repository","active":true,"events":["pull_request","issue_comment"],"config":{"url":"https://webhook-forwarder.github.com/hook"}}
+				],
+				[
+					{"id":202,"name":"web","type":"Repository","active":true,"events":["push"],"config":{"url":"https://example.com/webhook"}}
+				]
+			]`, ExitCode: 0}, nil
+		},
+	})
+
+	exitCode := app.Run(context.Background(), []string{"webhook", "cleanup", "acme/looper", "--config", configPath})
+	if exitCode != 0 {
+		t.Fatalf("Run(webhook cleanup) exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	if len(commands) != 1 || !strings.HasSuffix(commands[0], " api --paginate --slurp repos/acme/looper/hooks") {
+		t.Fatalf("commands = %q, want a single paginated+slurped gh api list call", commands)
+	}
+	for _, needle := range []string{"Found 1 GitHub CLI webhook hook(s)", "id=101", "Dry run only.", "looper webhook cleanup acme/looper --confirm"} {
+		if !strings.Contains(stdout.String(), needle) {
+			t.Fatalf("stdout = %q, want to contain %q", stdout.String(), needle)
+		}
+	}
+}
+
+func TestWebhookCleanupDryRunAcceptsHostQualifiedRepo(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeEditableCLIConfigWithPayload(t, map[string]any{
+		"notifications": map[string]any{
+			"osascript": map[string]any{"enabled": false},
+		},
+	})
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	commands := []string{}
+	app := New(Deps{
+		Stdout: stdout,
+		Stderr: stderr,
+		LookPath: func(command string) (string, error) {
+			if command == "gh" {
+				return "/usr/bin/gh", nil
+			}
+			return command, nil
+		},
+		RunCommand: func(ctx context.Context, command string, args []string, timeout time.Duration) (commandExecutionResult, error) {
+			commands = append(commands, command+" "+strings.Join(args, " "))
+			return commandExecutionResult{Stdout: `[[{"id":101,"name":"cli","type":"Repository","active":true,"events":["pull_request"],"config":{"url":"https://webhook-forwarder.github.com/hook"}}]]`, ExitCode: 0}, nil
+		},
+	})
+
+	exitCode := app.Run(context.Background(), []string{"webhook", "cleanup", " github.example.com/acme/looper ", "--config", configPath})
+	if exitCode != 0 {
+		t.Fatalf("Run(webhook cleanup host-qualified) exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	if len(commands) != 1 || !strings.HasSuffix(commands[0], " api --paginate --slurp repos/acme/looper/hooks --hostname github.example.com") {
+		t.Fatalf("commands = %q, want a paginated+slurped gh api list call using owner/repo plus --hostname", commands)
+	}
+	if !strings.Contains(stdout.String(), "looper webhook cleanup github.example.com/acme/looper --confirm") {
+		t.Fatalf("stdout = %q, want host-qualified cleanup rerun hint", stdout.String())
+	}
+}
+
+func TestWebhookCleanupConfirmUsesHostnameForHostQualifiedRepo(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeEditableCLIConfigWithPayload(t, map[string]any{
+		"notifications": map[string]any{
+			"osascript": map[string]any{"enabled": false},
+		},
+	})
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	commands := []string{}
+	app := New(Deps{
+		Stdout: stdout,
+		Stderr: stderr,
+		LookPath: func(command string) (string, error) {
+			if command == "gh" {
+				return "/usr/bin/gh", nil
+			}
+			return command, nil
+		},
+		RunCommand: func(ctx context.Context, command string, args []string, timeout time.Duration) (commandExecutionResult, error) {
+			commands = append(commands, command+" "+strings.Join(args, " "))
+			switch len(commands) {
+			case 1:
+				return commandExecutionResult{Stdout: `[[{"id":101,"name":"cli","type":"Repository","active":true,"events":["push","pull_request"],"config":{"url":"https://webhook-forwarder.github.com/hook"}}]]`, ExitCode: 0}, nil
+			case 2:
+				return commandExecutionResult{ExitCode: 0}, nil
+			default:
+				t.Fatalf("unexpected RunCommand call %d: %s %q", len(commands), command, args)
+				return commandExecutionResult{}, nil
+			}
+		},
+	})
+
+	exitCode := app.Run(context.Background(), []string{"webhook", "cleanup", "github.example.com/acme/looper", "--confirm", "--config", configPath})
+	if exitCode != 0 {
+		t.Fatalf("Run(webhook cleanup --confirm host-qualified) exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	if len(commands) != 2 || !strings.HasSuffix(commands[0], " api --paginate --slurp repos/acme/looper/hooks --hostname github.example.com") || !strings.HasSuffix(commands[1], " api -X DELETE repos/acme/looper/hooks/101 --hostname github.example.com") {
+		t.Fatalf("commands = %q, want host-qualified cleanup to split owner/repo from --hostname for list and delete", commands)
+	}
+	if !strings.Contains(stdout.String(), "Deleted 1 GitHub CLI webhook hook(s) for github.example.com/acme/looper.") {
+		t.Fatalf("stdout = %q, want delete confirmation for host-qualified repo", stdout.String())
+	}
+}
+
+func TestWebhookCleanupConfirmDeletesMatchingCLIHooks(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeEditableCLIConfigWithPayload(t, map[string]any{
+		"notifications": map[string]any{
+			"osascript": map[string]any{"enabled": false},
+		},
+	})
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	commands := []string{}
+	app := New(Deps{
+		Stdout: stdout,
+		Stderr: stderr,
+		LookPath: func(command string) (string, error) {
+			if command == "gh" {
+				return "/usr/bin/gh", nil
+			}
+			return command, nil
+		},
+		RunCommand: func(ctx context.Context, command string, args []string, timeout time.Duration) (commandExecutionResult, error) {
+			commands = append(commands, command+" "+strings.Join(args, " "))
+			switch len(commands) {
+			case 1:
+				return commandExecutionResult{Stdout: `[[{"id":101,"name":"cli","type":"Repository","active":true,"events":["push","pull_request"],"config":{"url":"https://webhook-forwarder.github.com/hook"}}]]`, ExitCode: 0}, nil
+			case 2:
+				return commandExecutionResult{ExitCode: 0}, nil
+			default:
+				t.Fatalf("unexpected RunCommand call %d: %s %q", len(commands), command, args)
+				return commandExecutionResult{}, nil
+			}
+		},
+	})
+
+	exitCode := app.Run(context.Background(), []string{"webhook", "cleanup", "acme/looper", "--confirm", "--config", configPath})
+	if exitCode != 0 {
+		t.Fatalf("Run(webhook cleanup --confirm) exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	if len(commands) != 2 || !strings.HasSuffix(commands[0], " api --paginate --slurp repos/acme/looper/hooks") || !strings.HasSuffix(commands[1], " api -X DELETE repos/acme/looper/hooks/101") {
+		t.Fatalf("commands = %q, want one paginated+slurped gh api list call followed by deleting the shown hook id", commands)
+	}
+	if !strings.Contains(stdout.String(), "Deleted 1 GitHub CLI webhook hook(s) for acme/looper.") {
+		t.Fatalf("stdout = %q, want delete confirmation", stdout.String())
+	}
+}
+
+func TestWebhookCleanupConfirmContinuesPastMissingShownHook(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeEditableCLIConfigWithPayload(t, map[string]any{
+		"notifications": map[string]any{
+			"osascript": map[string]any{"enabled": false},
+		},
+	})
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	commands := []string{}
+	app := New(Deps{
+		Stdout: stdout,
+		Stderr: stderr,
+		LookPath: func(command string) (string, error) {
+			if command == "gh" {
+				return "/usr/bin/gh", nil
+			}
+			return command, nil
+		},
+		RunCommand: func(ctx context.Context, command string, args []string, timeout time.Duration) (commandExecutionResult, error) {
+			commands = append(commands, command+" "+strings.Join(args, " "))
+			switch len(commands) {
+			case 1:
+				return commandExecutionResult{Stdout: `[[
+					{"id":101,"name":"cli","type":"Repository","active":true,"events":["push"],"config":{"url":"https://webhook-forwarder.github.com/hook"}},
+					{"id":202,"name":"cli","type":"Repository","active":true,"events":["pull_request"],"config":{"url":"https://webhook-forwarder.github.com/hook"}}
+				]]`, ExitCode: 0}, nil
+			case 2:
+				return commandExecutionResult{ExitCode: 1, Stderr: "gh: HTTP 404: Not Found (https://api.github.com/repos/acme/looper/hooks/101)"}, nil
+			case 3:
+				return commandExecutionResult{ExitCode: 0}, nil
+			default:
+				t.Fatalf("unexpected RunCommand call %d: %s %q", len(commands), command, args)
+				return commandExecutionResult{}, nil
+			}
+		},
+	})
+
+	exitCode := app.Run(context.Background(), []string{"webhook", "cleanup", "acme/looper", "--confirm", "--config", configPath})
+	if exitCode != 0 {
+		t.Fatalf("Run(webhook cleanup --confirm) exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	if len(commands) != 3 || !strings.HasSuffix(commands[1], " api -X DELETE repos/acme/looper/hooks/101") || !strings.HasSuffix(commands[2], " api -X DELETE repos/acme/looper/hooks/202") {
+		t.Fatalf("commands = %q, want cleanup to continue deleting the remaining shown hook ids after a 404", commands)
+	}
+	if !strings.Contains(stdout.String(), "Deleted 2 GitHub CLI webhook hook(s) for acme/looper.") {
+		t.Fatalf("stdout = %q, want delete confirmation after continuing past a missing hook", stdout.String())
 	}
 }
