@@ -101,6 +101,7 @@ func TestForwardRoutesPullRequestLabelChangesToFixerOnly(t *testing.T) {
 	fixerRunner.assertPRCount(t, 42, 1)
 	fixerRunner.assertPRCount(t, 43, 1)
 }
+
 func TestForwardTriggersFixerForFailedCheckWebhookEvents(t *testing.T) {
 	repos := newTestRepositories(t)
 	seedProject(t, repos, "project_1", "acme/looper")

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/nexu-io/looper/internal/bootstrap"
@@ -64,6 +65,11 @@ type WebhookForwarderState struct {
 	Repo          string   `json:"repo"`
 	Running       bool     `json:"running"`
 	PID           *int     `json:"pid,omitempty"`
+	Adopted       bool     `json:"adopted"`
+	Latched       bool     `json:"latched"`
+	LatchReason   *string  `json:"latchReason,omitempty"`
+	Fingerprint   string   `json:"fingerprint,omitempty"`
+	SpawnedAt     *string  `json:"spawnedAt,omitempty"`
 	Command       []string `json:"command"`
 	RestartCount  int      `json:"restartCount"`
 	LastStartedAt *string  `json:"lastStartedAt,omitempty"`
@@ -81,9 +87,14 @@ type webhookRuntime struct {
 	stopCh          chan struct{}
 	forwarderStopCh map[string]chan struct{}
 	mu              sync.RWMutex
+	bootstrapMu     sync.Mutex
 	wg              sync.WaitGroup
 	stopped         bool
 	reconcileRetry  bool
+	daemonID        string
+	probe           processProbe
+	forwarderStore  *storage.WebhookForwardersRepository
+	bootstrapDone   bool
 }
 
 func newWebhookRuntime(cfg config.Config, logger bootstrap.Logger, now func() time.Time) *webhookRuntime {
@@ -101,7 +112,7 @@ func newWebhookRuntime(cfg config.Config, logger bootstrap.Logger, now func() ti
 		RecentOutcomes:              []WebhookRecentOutcome{},
 		Forwarders:                  []WebhookForwarderState{},
 	}
-	rt := &webhookRuntime{logger: logger, now: now, ghPath: strings.TrimSpace(derefString(cfg.Tools.GHPath)), status: status, stopCh: make(chan struct{}), forwarderStopCh: map[string]chan struct{}{}}
+	rt := &webhookRuntime{logger: logger, now: now, ghPath: strings.TrimSpace(derefString(cfg.Tools.GHPath)), status: status, stopCh: make(chan struct{}), forwarderStopCh: map[string]chan struct{}{}, daemonID: newDaemonID(), probe: defaultProcessProbe{}}
 	if !cfg.Webhook.Enabled {
 		return rt
 	}
@@ -133,12 +144,106 @@ func (w *webhookRuntime) RecordDelivery(eventType, deliveryID string) {
 }
 
 func (w *webhookRuntime) Start(repos *storage.Repositories) {
+	w.Bootstrap(context.Background(), repos)
 	w.Reconcile(repos)
+}
+
+func (w *webhookRuntime) Bootstrap(ctx context.Context, repos *storage.Repositories) {
+	if w == nil || !w.status.Enabled || repos == nil || repos.WebhookForwarders == nil || repos.Projects == nil {
+		return
+	}
+	w.bootstrapMu.Lock()
+	defer w.bootstrapMu.Unlock()
+	if w.bootstrapCompleted() {
+		return
+	}
+	w.syncForwarderStore(repos.WebhookForwarders)
+	records, err := repos.WebhookForwarders.List(ctx)
+	if err != nil {
+		w.addDegradedReason(fmt.Sprintf("webhook forwarder bootstrap is incomplete: list records: %v", err))
+		return
+	}
+	if len(records) == 0 {
+		w.mu.Lock()
+		w.bootstrapDone = true
+		w.mu.Unlock()
+		return
+	}
+	projects, err := repos.Projects.List(ctx)
+	if err != nil {
+		w.addDegradedReason(fmt.Sprintf("webhook forwarder bootstrap is incomplete: list projects: %v", err))
+		return
+	}
+	desiredRepos := uniqueConfiguredWebhookRepos(projects)
+	desired := map[string]struct{}{}
+	for _, repo := range desiredRepos {
+		desired[repo] = struct{}{}
+	}
+	w.clearTransientReconcileDegradedReasons()
+	inconclusive := false
+	for _, record := range records {
+		if _, ok := desired[record.Repo]; !ok {
+			w.cleanupForwarderRecord(ctx, record, "repo_removed")
+			continue
+		}
+		if w.forwarderState(record.Repo) != nil {
+			continue
+		}
+		state := WebhookForwarderState{Repo: record.Repo, Command: []string{record.GHPath, "webhook", "forward", "--repo", record.Repo, "--events", record.Events, "--url", record.Endpoint}}
+		reason := w.adoptionGate(record, state.Command)
+		if reason == "" {
+			w.adoptForwarder(record, state.Command)
+			continue
+		}
+		if w.logger != nil {
+			w.logger.Warn("webhook.forwarder.adoption_rejected", map[string]any{"repo": record.Repo, "pid": record.PID, "reason": reason})
+		}
+		if reason == "probe_error" {
+			inconclusive = true
+			w.addDegradedReason(fmt.Sprintf("webhook forwarder bootstrap is incomplete: adoption probe for %s failed", record.Repo))
+			continue
+		}
+		w.cleanupForwarderRecord(ctx, record, "adoption_rejected")
+	}
+	if inconclusive {
+		return
+	}
+	w.mu.Lock()
+	w.bootstrapDone = true
+	w.mu.Unlock()
+}
+
+func (w *webhookRuntime) bootstrapCompleted() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.bootstrapDone
+}
+
+func (w *webhookRuntime) syncForwarderStore(store *storage.WebhookForwardersRepository) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.forwarderStore = store
+}
+
+func (w *webhookRuntime) canLaunchForwarders() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.status.Enabled && w.ghPath != "" && !w.hasLaunchBlockingDegradedReasonLocked()
 }
 
 func (w *webhookRuntime) Reconcile(repos *storage.Repositories) {
 	if w == nil || !w.status.Enabled {
 		return
+	}
+	if repos != nil {
+		w.syncForwarderStore(repos.WebhookForwarders)
+	}
+	if repos != nil && repos.WebhookForwarders != nil && !w.bootstrapCompleted() {
+		w.Bootstrap(context.Background(), repos)
+		if !w.bootstrapCompleted() {
+			w.scheduleReconcileRetry(repos)
+			return
+		}
 	}
 	if repos == nil || repos.Projects == nil {
 		w.addDegradedReason("project repositories are unavailable")
@@ -181,6 +286,10 @@ func (w *webhookRuntime) hasLaunchBlockingDegradedReason() bool {
 	}
 	w.mu.RLock()
 	defer w.mu.RUnlock()
+	return w.hasLaunchBlockingDegradedReasonLocked()
+}
+
+func (w *webhookRuntime) hasLaunchBlockingDegradedReasonLocked() bool {
 	for _, reason := range w.status.DegradedReasons {
 		if !strings.HasPrefix(reason, "forwarder for ") {
 			return true
@@ -200,16 +309,7 @@ func (w *webhookRuntime) Stop() {
 	}
 	w.stopped = true
 	close(w.stopCh)
-	forwarders := append([]WebhookForwarderState{}, w.status.Forwarders...)
 	w.mu.Unlock()
-	for _, forwarder := range forwarders {
-		if forwarder.PID == nil {
-			continue
-		}
-		if proc, err := osFindProcess(*forwarder.PID); err == nil {
-			_ = proc.Kill()
-		}
-	}
 	w.wg.Wait()
 }
 
@@ -231,6 +331,21 @@ func (w *webhookRuntime) Status() WebhookStatus {
 	return status
 }
 
+func (w *webhookRuntime) forwarderState(repo string) *WebhookForwarderState {
+	if w == nil {
+		return nil
+	}
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	for i := range w.status.Forwarders {
+		if w.status.Forwarders[i].Repo == repo {
+			state := w.status.Forwarders[i]
+			return &state
+		}
+	}
+	return nil
+}
+
 func (w *webhookRuntime) reconcileForwarders(repoSet map[string]struct{}) []string {
 	launchRepos := []string{}
 	type stopRequest struct {
@@ -248,6 +363,19 @@ func (w *webhookRuntime) reconcileForwarders(repoSet map[string]struct{}) []stri
 	existing := make(map[string]struct{}, len(w.status.Forwarders))
 	for _, state := range w.status.Forwarders {
 		if _, ok := repoSet[state.Repo]; ok {
+			wantFingerprint, _ := commandFingerprint(w.ghPath, state.Repo, webhookForwardEvents, w.status.EndpointURL)
+			if state.Latched && state.Fingerprint != "" && state.Fingerprint != wantFingerprint {
+				stops = append(stops, stopRequest{repo: state.Repo, pid: state.PID, stopCh: w.forwarderStopCh[state.Repo]})
+				delete(w.forwarderStopCh, state.Repo)
+				launchRepos = append(launchRepos, state.Repo)
+				kept = append(kept, WebhookForwarderState{Repo: state.Repo, Command: []string{w.ghPath, "webhook", "forward", "--repo", state.Repo, "--events", strings.Join(webhookForwardEvents, ","), "--url", w.status.EndpointURL}, Fingerprint: wantFingerprint})
+				w.forwarderStopCh[state.Repo] = make(chan struct{})
+				existing[state.Repo] = struct{}{}
+				if w.logger != nil {
+					w.logger.Info("webhook.forwarder.unlatched", map[string]any{"repo": state.Repo, "trigger": "config_change"})
+				}
+				continue
+			}
 			kept = append(kept, state)
 			existing[state.Repo] = struct{}{}
 			continue
@@ -259,9 +387,11 @@ func (w *webhookRuntime) reconcileForwarders(repoSet map[string]struct{}) []stri
 		if _, ok := existing[repo]; ok {
 			continue
 		}
+		fingerprint, _ := commandFingerprint(w.ghPath, repo, webhookForwardEvents, w.status.EndpointURL)
 		kept = append(kept, WebhookForwarderState{
-			Repo:    repo,
-			Command: []string{w.ghPath, "webhook", "forward", "--repo", repo, "--events", strings.Join(webhookForwardEvents, ","), "--url", w.status.EndpointURL},
+			Repo:        repo,
+			Command:     []string{w.ghPath, "webhook", "forward", "--repo", repo, "--events", strings.Join(webhookForwardEvents, ","), "--url", w.status.EndpointURL},
+			Fingerprint: fingerprint,
 		})
 		if _, ok := w.forwarderStopCh[repo]; !ok {
 			w.forwarderStopCh[repo] = make(chan struct{})
@@ -275,7 +405,7 @@ func (w *webhookRuntime) reconcileForwarders(repoSet map[string]struct{}) []stri
 		}
 		if stop.pid != nil {
 			if proc, err := osFindProcess(*stop.pid); err == nil {
-				_ = proc.Kill()
+				_ = proc.Signal(syscall.SIGTERM)
 			}
 		}
 	}
@@ -291,6 +421,286 @@ func (w *webhookRuntime) reconcileForwarders(repoSet map[string]struct{}) []stri
 	}
 	w.status.Degraded = len(w.status.DegradedReasons) > 0
 	return launchRepos
+}
+
+func (w *webhookRuntime) adoptionGate(record storage.WebhookForwarderRecord, command []string) string {
+	pid := int(record.PID)
+	probe := w.processProbe()
+	alive, err := probe.IsAlive(pid)
+	if err != nil {
+		return "probe_error"
+	}
+	if !alive {
+		return "pid_dead"
+	}
+	start, err := probe.StartTime(pid)
+	if err != nil {
+		return "probe_error"
+	}
+	if start != record.ProcessStart {
+		return "process_start_mismatch"
+	}
+	exe, err := probe.ExecutablePath(pid)
+	if err != nil {
+		return "probe_error"
+	}
+	argv, err := probe.Argv(pid)
+	if err != nil || len(argv) == 0 {
+		return "probe_error"
+	}
+	if exe != record.GHPath && argv[0] != record.GHPath {
+		return "gh_path_mismatch"
+	}
+	ghPath, endpoint, events := w.ghPath, w.status.EndpointURL, webhookForwardEvents
+	if ghPath == "" {
+		ghPath = record.GHPath
+	}
+	if endpoint != record.Endpoint || endpoint != w.status.EndpointURL {
+		return "endpoint_mismatch"
+	}
+	fingerprint, _ := commandFingerprint(ghPath, record.Repo, events, endpoint)
+	if fingerprint != record.Fingerprint {
+		return "fingerprint_mismatch"
+	}
+	if !argvMatchesWebhookForward(argv, record.Repo, events, endpoint) || strings.Contains(strings.ToLower(strings.Join(argv, " ")), "defunct") {
+		return "argv_mismatch"
+	}
+	return ""
+}
+
+func (w *webhookRuntime) adoptForwarder(record storage.WebhookForwarderRecord, command []string) {
+	pid := int(record.PID)
+	spawnedAt := formatJavaScriptISOString(time.Unix(0, record.SpawnedAt).UTC())
+	stopCh := make(chan struct{})
+	w.mu.Lock()
+	if w.forwarderStopCh == nil {
+		w.forwarderStopCh = map[string]chan struct{}{}
+	}
+	w.forwarderStopCh[record.Repo] = stopCh
+	w.status.Forwarders = append(w.status.Forwarders, WebhookForwarderState{Repo: record.Repo, Running: true, PID: &pid, Adopted: true, Fingerprint: record.Fingerprint, SpawnedAt: &spawnedAt, Command: append([]string{}, command...)})
+	w.mu.Unlock()
+	if w.logger != nil {
+		w.logger.Info("webhook.forwarder.adopted", map[string]any{"repo": record.Repo, "pid": pid, "process_start": record.ProcessStart, "fingerprint": record.Fingerprint})
+	}
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		proc := &adoptedForwarderProcess{pid: pid, processStart: record.ProcessStart, probe: w.processProbe()}
+		done := make(chan error, 1)
+		go func() { done <- proc.Wait() }()
+		select {
+		case <-w.stopCh:
+			_ = proc.Stop()
+			w.waitForAdoptedStop(proc, record.Repo)
+		case <-stopCh:
+			_ = proc.Stop()
+			w.waitForAdoptedStop(proc, record.Repo)
+		case err := <-done:
+			exitedAt := formatJavaScriptISOString(w.currentTime().UTC())
+			message := ""
+			if err != nil {
+				message = err.Error()
+			}
+			w.updateForwarder(record.Repo, stopCh, func(state *WebhookForwarderState) {
+				state.Running = false
+				state.PID = nil
+				state.LastExitAt = &exitedAt
+				state.LastError = message
+			})
+			w.deleteForwarderRecord(record.Repo)
+			if !w.isStopped() {
+				w.addDegradedReason(fmt.Sprintf("forwarder for %s exited: %s", record.Repo, message))
+				if w.canLaunchForwarders() && w.replaceForwarderForRespawn(record.Repo) {
+					w.launchForwarder(record.Repo)
+				} else {
+					w.removeForwarder(record.Repo)
+				}
+			}
+		}
+	}()
+}
+
+func (w *webhookRuntime) waitForAdoptedStop(proc *adoptedForwarderProcess, repo string) {
+	deadline := time.Now().Add(w.shutdownTimeout())
+	for time.Now().Before(deadline) {
+		alive, same, known := w.originalProcessState(proc.pid, proc.processStart)
+		if !known {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if !alive || !same {
+			w.deleteForwarderRecord(repo)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if alive, same, known := w.originalProcessState(proc.pid, proc.processStart); known && alive && same {
+		_ = proc.Kill()
+	}
+	for deadline := time.Now().Add(w.shutdownTimeout()); time.Now().Before(deadline); {
+		alive, same, known := w.originalProcessState(proc.pid, proc.processStart)
+		if !known {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if !alive || !same {
+			w.deleteForwarderRecord(repo)
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func (w *webhookRuntime) originalProcessState(pid int, processStart int64) (alive bool, sameIdentity bool, known bool) {
+	probe := w.processProbe()
+	alive, err := probe.IsAlive(pid)
+	if err != nil {
+		return false, false, false
+	}
+	if !alive {
+		return false, false, true
+	}
+	start, err := probe.StartTime(pid)
+	if err != nil {
+		return true, false, false
+	}
+	if start != processStart {
+		return true, false, true
+	}
+	return true, true, true
+}
+
+func (w *webhookRuntime) cleanupForwarderRecord(ctx context.Context, record storage.WebhookForwarderRecord, reason string) {
+	pid := int(record.PID)
+	verifyReason := ""
+	deleteRow := false
+	probe := w.processProbe()
+	if alive, err := probe.IsAlive(pid); err != nil {
+		verifyReason = "probe_error"
+	} else if !alive {
+		verifyReason = "pid_dead"
+		deleteRow = true
+	} else if start, err := probe.StartTime(pid); err != nil {
+		verifyReason = "probe_error"
+	} else if start != record.ProcessStart {
+		verifyReason = "process_start_mismatch"
+		deleteRow = true
+	} else if exe, err := probe.ExecutablePath(pid); err != nil {
+		verifyReason = "probe_error"
+	} else if exe != record.GHPath {
+		verifyReason = "gh_path_mismatch"
+		deleteRow = true
+	} else if argv, err := probe.Argv(pid); err != nil {
+		verifyReason = "probe_error"
+	} else if !argvMatchesWebhookForward(argv, record.Repo, strings.Split(record.Events, ","), record.Endpoint) {
+		verifyReason = "argv_mismatch"
+		deleteRow = true
+	}
+	if verifyReason == "gh_path_mismatch" {
+		if argv, err := probe.Argv(pid); err == nil && len(argv) > 0 && argv[0] == record.GHPath && argvMatchesWebhookForward(argv, record.Repo, strings.Split(record.Events, ","), record.Endpoint) {
+			verifyReason = ""
+			deleteRow = false
+		}
+	}
+	if verifyReason != "" {
+		if w.logger != nil {
+			w.logger.Warn("webhook.forwarder.orphan_refused", map[string]any{"repo": record.Repo, "pid": pid, "reason": verifyReason})
+		}
+		if !deleteRow {
+			return
+		}
+	} else {
+		proc, err := osFindProcess(pid)
+		if err != nil {
+			if w.logger != nil {
+				w.logger.Warn("webhook.forwarder.orphan_refused", map[string]any{"repo": record.Repo, "pid": pid, "reason": "find_process_error"})
+			}
+			return
+		}
+		_ = proc.Signal(syscall.SIGTERM)
+		deadline := time.Now().Add(w.shutdownTimeout())
+		for time.Now().Before(deadline) {
+			alive, same, known := w.originalProcessState(pid, record.ProcessStart)
+			if !known {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			if !alive || !same {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if alive, same, known := w.originalProcessState(pid, record.ProcessStart); known && alive && same {
+			_ = proc.Kill()
+		}
+		for deadline := time.Now().Add(w.shutdownTimeout()); time.Now().Before(deadline); {
+			alive, same, known := w.originalProcessState(pid, record.ProcessStart)
+			if !known {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			if !alive || !same {
+				deleteRow = true
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if !deleteRow {
+			return
+		}
+		if w.logger != nil {
+			w.logger.Info("webhook.forwarder.orphan_cleaned", map[string]any{"repo": record.Repo, "pid": pid, "reason": reason})
+		}
+	}
+	if w.forwarderStore != nil {
+		_ = w.forwarderStore.Delete(ctx, record.Repo)
+	}
+}
+
+func (w *webhookRuntime) replaceForwarderForRespawn(repo string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stopped {
+		return false
+	}
+	kept := w.status.Forwarders[:0]
+	found := false
+	for _, state := range w.status.Forwarders {
+		if state.Repo == repo {
+			found = true
+			continue
+		}
+		kept = append(kept, state)
+	}
+	if !found {
+		return false
+	}
+	stopCh := make(chan struct{})
+	w.forwarderStopCh[repo] = stopCh
+	fingerprint, _ := commandFingerprint(w.ghPath, repo, webhookForwardEvents, w.status.EndpointURL)
+	w.status.Forwarders = append(kept, WebhookForwarderState{Repo: repo, Command: []string{w.ghPath, "webhook", "forward", "--repo", repo, "--events", strings.Join(webhookForwardEvents, ","), "--url", w.status.EndpointURL}, Fingerprint: fingerprint})
+	return true
+}
+
+func (w *webhookRuntime) removeForwarder(repo string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	kept := w.status.Forwarders[:0]
+	for _, state := range w.status.Forwarders {
+		if state.Repo == repo {
+			continue
+		}
+		kept = append(kept, state)
+	}
+	w.status.Forwarders = kept
+	delete(w.forwarderStopCh, repo)
+}
+
+func (w *webhookRuntime) processProbe() processProbe {
+	if w == nil || w.probe == nil {
+		return defaultProcessProbe{}
+	}
+	return w.probe
 }
 
 func (w *webhookRuntime) launchForwarder(repo string) {
@@ -312,6 +722,10 @@ func (w *webhookRuntime) runForwarder(repo string) {
 	for {
 		state, stopCh, ok := w.forwarderSnapshot(repo)
 		if !ok {
+			return
+		}
+		if w.bootstrapCompleted() && w.currentForwarderStore() == nil {
+			w.recordForwarderError(repo, stopCh, "webhook forwarder store is unavailable", true)
 			return
 		}
 
@@ -336,6 +750,37 @@ func (w *webhookRuntime) runForwarder(repo string) {
 			}
 			continue
 		}
+		pid := cmd.Process.Pid
+		processStart, err := w.processProbe().StartTime(pid)
+		if err != nil {
+			w.killAndWait(cmd)
+			w.recordForwarderError(repo, stopCh, fmt.Sprintf("read process start: %v", err), true)
+			if !w.sleep(backoff, stopCh) {
+				return
+			}
+			if backoff < 10*time.Second {
+				backoff *= 2
+			}
+			continue
+		}
+		if store := w.currentForwarderStore(); store != nil {
+			record := webhookForwarderRecordFromState(repo, pid, processStart, state.Command, w.daemonID, w.currentTime())
+			if err := store.Upsert(context.Background(), record); err != nil {
+				w.killAndWait(cmd)
+				w.recordForwarderError(repo, stopCh, fmt.Sprintf("persist forwarder record: %v", err), true)
+				if !w.sleep(backoff, stopCh) {
+					return
+				}
+				if backoff < 10*time.Second {
+					backoff *= 2
+				}
+				continue
+			}
+		} else if w.bootstrapCompleted() {
+			w.killAndWait(cmd)
+			w.recordForwarderError(repo, stopCh, "webhook forwarder store is unavailable", true)
+			return
+		}
 		if webhookForwarderStartedHook != nil {
 			webhookForwarderStartedHook()
 		}
@@ -344,25 +789,44 @@ func (w *webhookRuntime) runForwarder(repo string) {
 			select {
 			case <-w.stopCh:
 				if cmd.Process != nil {
-					_ = cmd.Process.Kill()
+					_ = cmd.Process.Signal(syscall.SIGTERM)
+					select {
+					case <-stopKillDone:
+					case <-time.After(w.shutdownTimeout()):
+						_ = cmd.Process.Kill()
+					}
 				}
 			case <-stopCh:
 				if cmd.Process != nil {
-					_ = cmd.Process.Kill()
+					_ = cmd.Process.Signal(syscall.SIGTERM)
+					select {
+					case <-stopKillDone:
+					case <-time.After(w.shutdownTimeout()):
+						_ = cmd.Process.Kill()
+					}
 				}
 			case <-stopKillDone:
 			}
 		}()
 
 		startedAt := formatJavaScriptISOString(w.currentTime().UTC())
-		pid := cmd.Process.Pid
+		fingerprint, _ := commandFingerprint(w.ghPath, repo, webhookForwardEvents, w.status.EndpointURL)
+		spawnedAt := startedAt
 		w.clearForwarderDegradedReasons(repo)
 		w.updateForwarder(repo, stopCh, func(state *WebhookForwarderState) {
 			state.Running = true
 			state.PID = &pid
+			state.Adopted = false
+			state.Fingerprint = fingerprint
+			state.SpawnedAt = &spawnedAt
 			state.LastStartedAt = &startedAt
 			state.LastError = ""
+			state.StdoutTail = nil
+			state.StderrTail = nil
 		})
+		if w.logger != nil {
+			w.logger.Info("webhook.forwarder.spawned", map[string]any{"repo": repo, "pid": pid, "fingerprint": fingerprint, "daemon_id": w.daemonID})
+		}
 
 		var pipes sync.WaitGroup
 		pipes.Add(2)
@@ -383,6 +847,24 @@ func (w *webhookRuntime) runForwarder(repo string) {
 			state.LastError = message
 			state.RestartCount++
 		})
+		w.deleteForwarderRecord(repo)
+		classification := classifyForwarderExit(w.stderrTail(repo, stopCh), err)
+		if w.logger != nil {
+			w.logger.Info("webhook.forwarder.exited", map[string]any{"repo": repo, "pid": pid, "exit_class": string(classification.Class), "matched_pattern": classification.MatchedPattern, "wait_err": message})
+		}
+		if classification.Class == forwarderExitTerminal && !w.isStopped() && w.hasForwarder(repo, stopCh) {
+			reason := forwarderLatchReason(classification.MatchedPattern)
+			w.updateForwarder(repo, stopCh, func(state *WebhookForwarderState) {
+				state.Latched = true
+				state.LatchReason = &reason
+				state.LastError = reason
+			})
+			w.addDegradedReason(fmt.Sprintf("forwarder for %s latched: %s; polling fallback continues every %d seconds", state.Repo, reason, w.status.FallbackPollIntervalSeconds))
+			if w.logger != nil {
+				w.logger.Warn("webhook.forwarder.latched", map[string]any{"repo": repo, "latch_reason": reason})
+			}
+			return
+		}
 		if message != "" && !w.isStopped() && w.hasForwarder(repo, stopCh) {
 			w.addDegradedReason(fmt.Sprintf("forwarder for %s exited: %s", state.Repo, message))
 		}
@@ -415,6 +897,39 @@ func (w *webhookRuntime) recordForwarderError(repo string, stopCh chan struct{},
 	if degraded && w.hasForwarder(repo, stopCh) {
 		w.addDegradedReason(fmt.Sprintf("forwarder for %s failed: %s", strings.TrimSpace(repo), message))
 	}
+}
+
+func (w *webhookRuntime) currentForwarderStore() *storage.WebhookForwardersRepository {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.forwarderStore
+}
+
+func (w *webhookRuntime) deleteForwarderRecord(repo string) {
+	if store := w.currentForwarderStore(); store != nil {
+		if err := store.Delete(context.Background(), repo); err != nil && w.logger != nil {
+			w.logger.Warn("delete webhook forwarder record failed", map[string]any{"repo": repo, "error": err.Error()})
+		}
+	}
+}
+
+func (w *webhookRuntime) stderrTail(repo string, stopCh chan struct{}) []string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	for _, state := range w.status.Forwarders {
+		if state.Repo == repo && sameStopChannel(w.forwarderStopCh[repo], stopCh) {
+			return append([]string{}, state.StderrTail...)
+		}
+	}
+	return nil
+}
+
+func forwarderLatchReason(pattern string) string {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		pattern = "terminal gh webhook forward failure"
+	}
+	return fmt.Sprintf("terminal gh webhook forward failure matched %q; remove the conflicting GitHub webhook or fix gh authentication, then restart looperd", pattern)
 }
 
 func (w *webhookRuntime) forwarderSnapshot(repo string) (WebhookForwarderState, chan struct{}, bool) {
@@ -469,7 +984,7 @@ func (w *webhookRuntime) clearForwarderDegradedReasons(repo string) {
 
 func (w *webhookRuntime) clearTransientReconcileDegradedReasons() {
 	w.clearDegradedReasons(func(reason string) bool {
-		return reason == "project repositories are unavailable" || strings.HasPrefix(reason, "list configured projects: ")
+		return reason == "project repositories are unavailable" || strings.HasPrefix(reason, "list configured projects: ") || strings.HasPrefix(reason, "webhook forwarder bootstrap is incomplete")
 	})
 }
 
@@ -524,6 +1039,18 @@ func (w *webhookRuntime) currentTime() time.Time {
 		return time.Now()
 	}
 	return w.now()
+}
+
+func (w *webhookRuntime) killAndWait(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+}
+
+func (w *webhookRuntime) shutdownTimeout() time.Duration {
+	return 5 * time.Second
 }
 
 func (w *webhookRuntime) scheduleReconcileRetry(repos *storage.Repositories) {
