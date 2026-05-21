@@ -489,6 +489,10 @@ func (g *Gateway) WorktreeClean(ctx context.Context, worktreePath string) (bool,
 	return len(entries) == 0, nil
 }
 
+func (g *Gateway) IsWorktreeClean(ctx context.Context, worktreePath string) (bool, error) {
+	return g.WorktreeClean(ctx, worktreePath)
+}
+
 func (g *Gateway) Push(ctx context.Context, input PushInput) error {
 	if err := g.AssertWritableBranch(input.Branch, input.ProtectedBranches); err != nil {
 		return err
