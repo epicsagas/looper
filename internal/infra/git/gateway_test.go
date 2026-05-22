@@ -327,32 +327,27 @@ func TestGatewayAttachedWorktreeFallsBackToRemoteOnlyBaseBranch(t *testing.T) {
 	}
 }
 
-func TestGatewayAttachedWorktreeFallsBackToLocalBaseBranchWhenRemoteProbeFails(t *testing.T) {
+func TestGatewayAttachedWorktreeFailsWhenWorkerBranchLookupErrors(t *testing.T) {
 	ctx := context.Background()
 	fixture := newFixture(t)
 	fixture.createMainOnlyRepo(t)
+	branch := "worker/offline-main-fallback"
+	fixture.createUnfetchedRemoteBranch(t, branch)
 	runGit(t, fixture.repoPath, "remote", "set-url", "origin", filepath.Join(fixture.rootDir, "missing-remote.git"))
 	gateway := fixture.gateway()
 
-	localBaseSHA := stringsTrimSpace(runGit(t, fixture.repoPath, "rev-parse", "main"))
-	worktree, err := gateway.CreateWorktree(ctx, CreateWorktreeInput{
+	_, err := gateway.CreateWorktree(ctx, CreateWorktreeInput{
 		ProjectID:    fixture.projectID,
 		RepoPath:     fixture.repoPath,
 		WorktreeRoot: fixture.worktreeRoot,
-		Branch:       "worker/offline-main-fallback",
+		Branch:       branch,
 		BaseBranch:   "main",
 	})
-	if err != nil {
-		t.Fatalf("CreateWorktree() error = %v", err)
+	if err == nil {
+		t.Fatal("CreateWorktree() error = nil, want branch lookup failure")
 	}
-
-	if got := stringsTrimSpace(runGit(t, worktree.WorktreePath, "branch", "--show-current")); got != "worker/offline-main-fallback" {
-		t.Fatalf("attached branch name = %q, want worker/offline-main-fallback", got)
-	}
-
-	worktreeHeadSHA := stringsTrimSpace(runGit(t, worktree.WorktreePath, "rev-parse", "HEAD"))
-	if worktreeHeadSHA != localBaseSHA {
-		t.Fatalf("attached HEAD = %q, want %q", worktreeHeadSHA, localBaseSHA)
+	if !strings.Contains(err.Error(), "git ls-remote --heads origin "+branch) {
+		t.Fatalf("CreateWorktree() error = %v, want worker branch lookup failure", err)
 	}
 }
 
@@ -385,6 +380,69 @@ func TestGatewayPushesHeadToRequestedRemoteBranch(t *testing.T) {
 	worktreeHeadSHA := stringsTrimSpace(runGit(t, worktree.WorktreePath, "rev-parse", "HEAD"))
 	if remoteHeadSHA != worktreeHeadSHA {
 		t.Fatalf("remote head = %q, want %q", remoteHeadSHA, worktreeHeadSHA)
+	}
+}
+
+func TestGatewayCreatesAttachedWorktreeFromRemoteOnlyBranch(t *testing.T) {
+	ctx := context.Background()
+	fixture := newFixture(t)
+	fixture.createMainOnlyRepo(t)
+	fixture.createUnfetchedRemoteBranch(t, "looper/715-error-exporting-apresentations-f1db7b9a10e512af")
+	gateway := fixture.gateway()
+
+	worktree, err := gateway.CreateWorktree(ctx, CreateWorktreeInput{
+		ProjectID:    fixture.projectID,
+		RepoPath:     fixture.repoPath,
+		WorktreeRoot: fixture.worktreeRoot,
+		Branch:       "looper/715-error-exporting-apresentations-f1db7b9a10e512af",
+		BaseBranch:   "main",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktree() error = %v", err)
+	}
+
+	remoteHeadSHA := stringsTrimSpace(runGit(t, fixture.remotePath, "rev-parse", "refs/heads/looper/715-error-exporting-apresentations-f1db7b9a10e512af"))
+	worktreeHeadSHA := stringsTrimSpace(runGit(t, worktree.WorktreePath, "rev-parse", "HEAD"))
+	if worktreeHeadSHA != remoteHeadSHA {
+		t.Fatalf("worktree HEAD = %q, want remote branch head %q", worktreeHeadSHA, remoteHeadSHA)
+	}
+	if got := stringsTrimSpace(runGit(t, worktree.WorktreePath, "branch", "--show-current")); got != "looper/715-error-exporting-apresentations-f1db7b9a10e512af" {
+		t.Fatalf("branch = %q, want remote-only branch checkout", got)
+	}
+	if got := stringsTrimSpace(runGitMaybe(t, fixture.repoPath, "show-ref", "--verify", "refs/remotes/origin/looper/715-error-exporting-apresentations-f1db7b9a10e512af")); got == "" {
+		t.Fatal("origin remote-tracking branch missing after CreateWorktree()")
+	}
+}
+
+func TestGatewayCreatesAttachedWorktreeAfterRemoteBranchForcePush(t *testing.T) {
+	ctx := context.Background()
+	fixture := newFixture(t)
+	fixture.createMainOnlyRepo(t)
+	branch := "looper/force-pushed-worker-branch"
+	fixture.createUnfetchedRemoteBranch(t, branch)
+	runGit(t, fixture.repoPath, "fetch", "origin", fmt.Sprintf("refs/heads/%s:refs/remotes/origin/%s", branch, branch))
+	fixture.forcePushRemoteBranch(t, branch, sanitizeBranchName(branch)+"-force.txt", "force-pushed remote change\n")
+	gateway := fixture.gateway()
+
+	worktree, err := gateway.CreateWorktree(ctx, CreateWorktreeInput{
+		ProjectID:    fixture.projectID,
+		RepoPath:     fixture.repoPath,
+		WorktreeRoot: fixture.worktreeRoot,
+		Branch:       branch,
+		BaseBranch:   "main",
+	})
+	if err != nil {
+		t.Fatalf("CreateWorktree() error = %v", err)
+	}
+
+	remoteHeadSHA := stringsTrimSpace(runGit(t, fixture.remotePath, "rev-parse", "refs/heads/"+branch))
+	worktreeHeadSHA := stringsTrimSpace(runGit(t, worktree.WorktreePath, "rev-parse", "HEAD"))
+	if worktreeHeadSHA != remoteHeadSHA {
+		t.Fatalf("worktree HEAD = %q, want force-pushed remote branch head %q", worktreeHeadSHA, remoteHeadSHA)
+	}
+	trackingSHA := stringsTrimSpace(runGit(t, fixture.repoPath, "rev-parse", "refs/remotes/origin/"+branch))
+	if trackingSHA != remoteHeadSHA {
+		t.Fatalf("remote tracking HEAD = %q, want %q", trackingSHA, remoteHeadSHA)
 	}
 }
 
@@ -867,6 +925,26 @@ func TestGatewayRemoteBranchExistsTreatsOnlyExitCode1AsMissing(t *testing.T) {
 	}
 }
 
+func TestGatewayRemoteBranchExistsUsesFetchedTrackingRef(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	fixture := newFixture(t)
+	branch := "feature/fixer"
+	fixture.createRemoteRepo(t, branch)
+	runGit(t, fixture.repoPath, "fetch", "origin", fmt.Sprintf("refs/heads/%s:refs/remotes/origin/%s", branch, branch))
+	runGit(t, fixture.repoPath, "remote", "set-url", "origin", filepath.Join(fixture.rootDir, "missing-remote.git"))
+	gateway := fixture.gateway()
+
+	exists, err := gateway.remoteBranchExists(ctx, fixture.repoPath, "origin", branch)
+	if err != nil {
+		t.Fatalf("remoteBranchExists(fetched tracking ref) error = %v", err)
+	}
+	if !exists {
+		t.Fatal("remoteBranchExists(fetched tracking ref) = false, want true")
+	}
+}
+
 func TestGatewayRestoreWorktreePropagatesHealthCheckFailureForStoredWorktree(t *testing.T) {
 	t.Parallel()
 
@@ -1017,6 +1095,19 @@ func (f *fixture) advanceRemoteBranch(t *testing.T, branch, fileName, contents s
 	runGit(t, clonePath, "add", fileName)
 	runGit(t, clonePath, "commit", "-m", "remote update")
 	runGit(t, clonePath, "push", "origin", branch)
+}
+
+func (f *fixture) forcePushRemoteBranch(t *testing.T, branch, fileName, contents string) {
+	t.Helper()
+	clonePath := filepath.Join(f.rootDir, "remote-force-clone-"+sanitizeBranchName(branch))
+	runGit(t, f.rootDir, "clone", f.remotePath, clonePath)
+	configureRepo(t, clonePath)
+	runGit(t, clonePath, "checkout", branch)
+	runGit(t, clonePath, "reset", "--hard", "origin/main")
+	writeFile(t, filepath.Join(clonePath, fileName), contents)
+	runGit(t, clonePath, "add", fileName)
+	runGit(t, clonePath, "commit", "-m", "remote force update")
+	runGit(t, clonePath, "push", "--force", "origin", branch)
 }
 
 func configureRepo(t *testing.T, repoPath string) {
