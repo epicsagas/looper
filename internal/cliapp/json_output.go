@@ -381,15 +381,24 @@ func (r *commandRuntime) activeRuns(cmd *cobra.Command, args []string) error {
 }
 
 func (r *commandRuntime) loopLogs(cmd *cobra.Command, args []string) error {
+	selector := strings.TrimSpace(args[0])
 	if getBoolFlag(cmd, "follow") {
 		if getBoolFlag(cmd, "json") {
 			return fmt.Errorf("--json cannot be combined with --follow")
 		}
-		return r.followLoopLogs(cmd, strings.TrimSpace(args[0]))
+		if strings.HasPrefix(selector, "run_") {
+			return fmt.Errorf("run-scoped logs cannot be followed; use the owning loop id to follow current loop logs")
+		}
+		return r.followLoopLogs(cmd, selector)
+	}
+
+	logsPath := "/api/v1/loops/" + url.PathEscape(selector) + "/logs"
+	if strings.HasPrefix(selector, "run_") {
+		logsPath = "/api/v1/runs/" + url.PathEscape(selector) + "/logs"
 	}
 
 	return r.outputCommand(cmd, func(ctx context.Context) (json.RawMessage, error) {
-		return r.getJSON(ctx, "/api/v1/loops/"+url.PathEscape(strings.TrimSpace(args[0]))+"/logs")
+		return r.getJSON(ctx, logsPath)
 	}, func(w io.Writer, payload json.RawMessage) error {
 		return writeHumanLoopLogs(w, payload, getBoolFlag(cmd, "stderr"), getBoolFlag(cmd, "full"), getStringFlag(cmd, "tail"))
 	})
