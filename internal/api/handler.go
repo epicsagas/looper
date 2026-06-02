@@ -1077,7 +1077,7 @@ func (h *Handler) buildStatusResponse(ctx context.Context) (statusResponse, erro
 				InstallDir:       installDir,
 				CurrentTarget:    currentTarget,
 				ArtifactName:     artifactName,
-				SupportedTargets: []string{"darwin-arm64"},
+				SupportedTargets: []string{"darwin-arm64", "linux-amd64"},
 			},
 		},
 		Storage: statusStorage{
@@ -5649,6 +5649,7 @@ func deriveProjectIDFromRepoPath(repoPath string) string {
 func looperdArtifactName(target string) *string {
 	supported := map[string]struct{}{
 		"darwin-arm64": {},
+		"linux-amd64":  {},
 	}
 
 	if _, ok := supported[target]; !ok {
