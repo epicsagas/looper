@@ -26,6 +26,7 @@ import (
 	"github.com/nexu-io/looper/internal/reviewer"
 	looperdruntime "github.com/nexu-io/looper/internal/runtime"
 	"github.com/nexu-io/looper/internal/storage"
+	"github.com/nexu-io/looper/internal/version"
 	"github.com/nexu-io/looper/internal/webhookforward"
 )
 
@@ -359,6 +360,56 @@ func TestHandlerActiveRunsSurfacesResumePolicyManualIntervention(t *testing.T) {
 	}
 	item := items[0].(map[string]any)
 	assertEqual(t, item["status"], "paused")
+	assertEqual(t, item["loopStatus"], "paused")
+	assertEqual(t, item["displayStatus"], "manual_intervention")
+	assertEqual(t, item["resumePolicy"], "manual_intervention")
+}
+
+func TestHandlerActiveRunsDefaultIncludesInterruptedManualResumeAndExcludesCompleted(t *testing.T) {
+	rt, cfg := startTestRuntime(t)
+	h := NewHandler(Context{Config: cfg, Runtime: rt})
+	services := rt.Services()
+	nowISO := "2026-04-11T12:00:00.000Z"
+	projectID := "project_manual_resume_status_filter"
+	checkpoint := `{"resumePolicy":"manual_intervention"}`
+
+	if err := services.Repositories.Projects.Upsert(context.Background(), storage.ProjectRecord{ID: projectID, Name: "Looper", RepoPath: "/tmp/repos/looper", CreatedAt: nowISO, UpdatedAt: nowISO}); err != nil {
+		t.Fatalf("Projects.Upsert() error = %v", err)
+	}
+
+	interruptedLoopID := "loop_manual_resume_interrupted"
+	interruptedTargetID := interruptedLoopID + ":target"
+	if err := services.Repositories.Loops.Upsert(context.Background(), storage.LoopRecord{ID: interruptedLoopID, Seq: 48, ProjectID: projectID, Type: "worker", TargetType: "project", TargetID: &interruptedTargetID, Status: "interrupted", CreatedAt: nowISO, UpdatedAt: nowISO}); err != nil {
+		t.Fatalf("Loops.Upsert(interrupted) error = %v", err)
+	}
+	if err := services.Repositories.Runs.Upsert(context.Background(), storage.RunRecord{ID: "run_manual_resume_interrupted", LoopID: interruptedLoopID, Status: "interrupted", CheckpointJSON: &checkpoint, StartedAt: nowISO, EndedAt: &nowISO, CreatedAt: nowISO, UpdatedAt: nowISO}); err != nil {
+		t.Fatalf("Runs.Upsert(interrupted) error = %v", err)
+	}
+
+	completedLoopID := "loop_manual_resume_completed"
+	completedTargetID := completedLoopID + ":target"
+	if err := services.Repositories.Loops.Upsert(context.Background(), storage.LoopRecord{ID: completedLoopID, Seq: 49, ProjectID: projectID, Type: "worker", TargetType: "project", TargetID: &completedTargetID, Status: "completed", CreatedAt: nowISO, UpdatedAt: nowISO}); err != nil {
+		t.Fatalf("Loops.Upsert(completed) error = %v", err)
+	}
+	if err := services.Repositories.Runs.Upsert(context.Background(), storage.RunRecord{ID: "run_manual_resume_completed", LoopID: completedLoopID, Status: "failed", CheckpointJSON: &checkpoint, StartedAt: nowISO, EndedAt: &nowISO, CreatedAt: nowISO, UpdatedAt: nowISO}); err != nil {
+		t.Fatalf("Runs.Upsert(completed) error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/active", nil)
+	recorder := httptest.NewRecorder()
+	h.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+	body := parseJSONMap(t, recorder.Body.Bytes())
+	items := body["data"].(map[string]any)["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("items len = %d, want 1: %#v", len(items), items)
+	}
+	item := items[0].(map[string]any)
+	assertEqual(t, item["loopId"], interruptedLoopID)
+	assertEqual(t, item["status"], "interrupted")
+	assertEqual(t, item["loopStatus"], "interrupted")
 	assertEqual(t, item["displayStatus"], "manual_intervention")
 	assertEqual(t, item["resumePolicy"], "manual_intervention")
 }
@@ -474,6 +525,36 @@ func TestHandlerStatusSuccessContainsExpectedSections(t *testing.T) {
 	assertEqual(t, reviewer["waiting"], float64(1))
 	assertEqual(t, reviewer["terminated"], float64(1))
 	assertEqual(t, reviewer["stopped"], float64(1))
+}
+
+func TestHandlerVersionSuccessContainsExpectedFields(t *testing.T) {
+	rt, cfg := startTestRuntime(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/version", nil)
+	req.Header.Set("x-request-id", "fixture-request-id")
+	recorder := httptest.NewRecorder()
+
+	NewHandler(Context{Config: cfg, Runtime: rt}).ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	body := parseJSONMap(t, recorder.Body.Bytes())
+	assertEqual(t, body["ok"], true)
+	assertEqual(t, body["requestId"], "fixture-request-id")
+
+	data := body["data"].(map[string]any)
+	binaryInfo := data["binary"].(map[string]any)
+	assertEqual(t, data["version"], version.Current().Version)
+	assertEqual(t, binaryInfo["name"], "looperd")
+	binaryPath, ok := binaryInfo["path"].(string)
+	if !ok || strings.TrimSpace(binaryPath) == "" {
+		t.Fatalf("binary.path missing/invalid: %#v", binaryInfo["path"])
+	}
+	build, ok := data["build"].(map[string]any)
+	if !ok {
+		t.Fatalf("build missing/invalid: %#v", data["build"])
+	}
+	assertEqual(t, build["apiVersion"], version.Current().Metadata.APIVersion)
 }
 
 func TestHandlerConfigSuccessContainsExpectedSections(t *testing.T) {
@@ -5405,6 +5486,67 @@ func TestActiveRunsStatusAndTypeFiltersIncludeInactiveCompletedWorkerLoops(t *te
 	assertEqual(t, filteredItem["status"], "completed")
 	assertEqual(t, filteredItem["runId"], nil)
 	assertEqual(t, filteredItem["agent"], nil)
+}
+
+func TestActiveRunsIgnoresStaleManualInterventionQueueHistory(t *testing.T) {
+	fixture := newTestFixture(t)
+	nowISO := fixture.now.UTC().Format(javaScriptISOString)
+	manualAt := fixture.now.Add(-2 * time.Minute).UTC().Format(javaScriptISOString)
+	completedAt := fixture.now.Add(-time.Minute).UTC().Format(javaScriptISOString)
+	projectID := "project_1"
+	loopID := "loop_worker_completed_after_manual"
+	targetID := "issue:acme/looper:45"
+	manualReason := "needs manual intervention"
+	manualKind := "manual_intervention"
+
+	if err := fixture.runtime.Services().Repositories.Projects.Upsert(context.Background(), storage.ProjectRecord{
+		ID:        projectID,
+		Name:      "Looper",
+		RepoPath:  "/tmp/repos/looper",
+		Archived:  false,
+		CreatedAt: nowISO,
+		UpdatedAt: nowISO,
+	}); err != nil {
+		t.Fatalf("Projects.Upsert() error = %v", err)
+	}
+
+	if err := fixture.runtime.Services().Repositories.Loops.Upsert(context.Background(), storage.LoopRecord{
+		ID:         loopID,
+		Seq:        15,
+		ProjectID:  projectID,
+		Type:       "worker",
+		TargetType: "issue",
+		TargetID:   stringPtr(targetID),
+		Repo:       stringPtr("acme/looper"),
+		Status:     "completed",
+		LastRunAt:  stringPtr(completedAt),
+		CreatedAt:  nowISO,
+		UpdatedAt:  completedAt,
+	}); err != nil {
+		t.Fatalf("Loops.Upsert() error = %v", err)
+	}
+
+	for _, item := range []storage.QueueItemRecord{
+		{ID: "queue_manual", ProjectID: &projectID, LoopID: &loopID, Type: "worker", TargetType: "issue", TargetID: targetID, Repo: stringPtr("acme/looper"), DedupeKey: "worker:manual", Priority: storage.QueuePriorityWorker, Status: "manual_intervention", AvailableAt: manualAt, Attempts: 1, MaxAttempts: 3, LastError: &manualReason, LastErrorKind: &manualKind, CreatedAt: manualAt, UpdatedAt: manualAt},
+		{ID: "queue_completed", ProjectID: &projectID, LoopID: &loopID, Type: "worker", TargetType: "issue", TargetID: targetID, Repo: stringPtr("acme/looper"), DedupeKey: "worker:completed", Priority: storage.QueuePriorityWorker, Status: "completed", AvailableAt: completedAt, Attempts: 1, MaxAttempts: 3, FinishedAt: &completedAt, CreatedAt: completedAt, UpdatedAt: completedAt},
+	} {
+		if err := fixture.runtime.Services().Repositories.Queue.Upsert(context.Background(), item); err != nil {
+			t.Fatalf("Queue.Upsert(%s) error = %v", item.ID, err)
+		}
+	}
+
+	h := NewHandler(Context{Config: fixture.config, Runtime: fixture.runtime})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/active", nil)
+	recorder := httptest.NewRecorder()
+	h.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	body := parseJSONMap(t, recorder.Body.Bytes())
+	items := body["data"].(map[string]any)["items"].([]any)
+	if len(items) != 0 {
+		t.Fatalf("len(items) = %d, want 0", len(items))
+	}
 }
 
 func TestActiveRunsAllIncludesInactiveCompletedLoopWithLatestRunFields(t *testing.T) {
