@@ -778,7 +778,7 @@ func (r *Runner) DiscoverPullRequests(ctx context.Context, input DiscoveryInput)
 	}
 	enqueue := func(pr PullRequestSummary, existing *storage.LoopRecord) error {
 
-		return r.enqueueReviewerDiscoveryCandidate(ctx, *project, input.Repo, policy, &currentLogin, pr, existing, &result)
+		return r.enqueueReviewerDiscoveryCandidate(ctx, *project, input.Repo, policy, &currentLogin, pr, existing, false, &result)
 
 	}
 	seenEnqueue := func(pr PullRequestSummary) error {
@@ -924,14 +924,14 @@ func (r *Runner) DiscoverPullRequest(ctx context.Context, input TargetedDiscover
 		result.Skipped++
 		return result, nil
 	}
-	if err := r.enqueueReviewerDiscoveryCandidate(ctx, *project, input.Repo, policy, &currentLogin, pr, nil, &result); err != nil {
+	if err := r.enqueueReviewerDiscoveryCandidate(ctx, *project, input.Repo, policy, &currentLogin, pr, nil, false, &result); err != nil {
 
 		return DiscoveryResult{}, err
 	}
 	return result, nil
 }
 
-func (r *Runner) enqueueReviewerDiscoveryCandidate(ctx context.Context, project storage.ProjectRecord, repo string, policy DiscoveryPolicy, currentLogin *string, pr PullRequestSummary, existing *storage.LoopRecord, result *DiscoveryResult) error {
+func (r *Runner) enqueueReviewerDiscoveryCandidate(ctx context.Context, project storage.ProjectRecord, repo string, policy DiscoveryPolicy, currentLogin *string, pr PullRequestSummary, existing *storage.LoopRecord, allowThreadResolutionFollowUp bool, result *DiscoveryResult) error {
 	loopResult, loopErr := r.ensureLoopForPullRequest(ctx, project, repo, pr.Number, existing)
 	if loopErr != nil {
 		return loopErr
@@ -958,10 +958,6 @@ func (r *Runner) enqueueReviewerDiscoveryCandidate(ctx context.Context, project 
 		result.Skipped++
 		return nil
 	}
-	if reviewerDiscoverySuppressedByLastSkip(meta, pr, *currentLogin, policy) {
-		result.Skipped++
-		return nil
-	}
 	if reviewerLastSkipNeedsCurrentLogin(meta, pr) && *currentLogin == "" {
 		lookupLogin, lookupErr := r.github.GetCurrentUserLogin(ctx, project.RepoPath)
 		if lookupErr != nil {
@@ -969,7 +965,7 @@ func (r *Runner) enqueueReviewerDiscoveryCandidate(ctx context.Context, project 
 		}
 		*currentLogin = normalizeLogin(lookupLogin)
 	}
-	if reviewerDiscoverySuppressedByLastSkip(meta, pr, *currentLogin, policy) {
+	if reviewerDiscoverySuppressedByLastSkip(meta, pr, *currentLogin, policy) && !allowThreadResolutionFollowUp && !r.allowThreadResolutionFollowUpAfterNotRequestedSkip(ctx, project.RepoPath, repo, pr, *currentLogin, meta, policy) {
 		result.Skipped++
 		return nil
 	}
@@ -996,6 +992,25 @@ func (r *Runner) enqueueReviewerDiscoveryCandidate(ctx context.Context, project 
 	return nil
 }
 
+func (r *Runner) allowThreadResolutionFollowUpAfterNotRequestedSkip(ctx context.Context, cwd, repo string, pr PullRequestSummary, currentLogin string, meta map[string]any, policy DiscoveryPolicy) bool {
+	if networkpolicy.IsRouted(policy.RoutedClaimPolicy) || !policy.RequireReviewRequest {
+		return false
+	}
+	raw, _ := meta["lastFilterSkip"].(map[string]any)
+	if raw == nil {
+		return false
+	}
+	kind, _ := stringFromAny(raw["kind"])
+	if kind != "not_requested" || !reviewRequestsKnownAbsent(pr.ReviewRequests, currentLogin) {
+		return false
+	}
+	reviewerLogin, _ := stringFromAny(raw["reviewerLogin"])
+	if normalizeLogin(reviewerLogin) == "" || normalizeLogin(currentLogin) == "" || normalizeLogin(reviewerLogin) != normalizeLogin(currentLogin) {
+		return false
+	}
+	return r.hasThreadResolutionFollowUpCandidate(ctx, cwd, repo, pr.Number, pr.HeadSHA, currentLogin)
+}
+
 func (r *Runner) discoverExistingReviewerLoop(ctx context.Context, project storage.ProjectRecord, repo string, policy DiscoveryPolicy, currentLogin *string, loop storage.LoopRecord, detail PullRequestDetail, result *DiscoveryResult) error {
 	if !policy.IncludeDrafts && detail.IsDraft {
 		result.Skipped++
@@ -1013,15 +1028,19 @@ func (r *Runner) discoverExistingReviewerLoop(ctx context.Context, project stora
 		return nil
 	}
 	requireReviewRequest := requireReviewRequestForLoop(loop, policy.RequireReviewRequest, detail.HeadSHA)
-	if !networkpolicy.IsRouted(policy.RoutedClaimPolicy) && requireReviewRequest && reviewRequestsKnownAbsent(detail.ReviewRequests, *currentLogin) && !r.hasThreadResolutionFollowUpCandidate(ctx, project.RepoPath, repo, detail.Number, detail.HeadSHA, *currentLogin) {
-		result.Skipped++
-		return nil
+	allowThreadResolutionFollowUp := false
+	if !networkpolicy.IsRouted(policy.RoutedClaimPolicy) && requireReviewRequest && reviewRequestsKnownAbsent(detail.ReviewRequests, *currentLogin) {
+		allowThreadResolutionFollowUp = r.hasThreadResolutionFollowUpCandidate(ctx, project.RepoPath, repo, detail.Number, detail.HeadSHA, *currentLogin)
+		if !allowThreadResolutionFollowUp {
+			result.Skipped++
+			return nil
+		}
 	}
 	if !isManualReviewerLoop(loop) && !labelsMatch(detail.Labels, policy.Labels, policy.LabelMode) {
 		result.Skipped++
 		return nil
 	}
-	return r.enqueueReviewerDiscoveryCandidate(ctx, project, repo, policy, currentLogin, summaryFromDetail(detail), &loop, result)
+	return r.enqueueReviewerDiscoveryCandidate(ctx, project, repo, policy, currentLogin, summaryFromDetail(detail), &loop, allowThreadResolutionFollowUp, result)
 }
 
 func (r *Runner) findReviewerLoopsByPR(ctx context.Context, projectID, repo string, prNumber int64) ([]storage.LoopRecord, error) {
@@ -4939,6 +4958,21 @@ func reviewerDiscoverySuppressedByLastSkip(meta map[string]any, pr PullRequestSu
 		if draft, ok := raw["isDraft"].(bool); ok && draft != pr.IsDraft {
 			return false
 		}
+	case "not_requested":
+		if !policy.RequireReviewRequest {
+			return false
+		}
+		reviewerLogin, _ := stringFromAny(raw["reviewerLogin"])
+		if normalizeLogin(reviewerLogin) == "" || normalizeLogin(currentLogin) == "" || normalizeLogin(reviewerLogin) != normalizeLogin(currentLogin) {
+			return false
+		}
+		if networkpolicy.IsRouted(policy.RoutedClaimPolicy) {
+			decision := routedReviewerClaimDecision(policy, currentLogin, pr.Author, pr.Labels, pr.ReviewRequestUsers)
+			return !decision.Allowed && decision.Reason == "local GitHub identity is not requested for review"
+		}
+		if !reviewRequestsKnownAbsent(pr.ReviewRequests, currentLogin) {
+			return false
+		}
 	}
 	return true
 }
@@ -4949,7 +4983,7 @@ func reviewerLastSkipNeedsCurrentLogin(meta map[string]any, pr PullRequestSummar
 		return false
 	}
 	kind, _ := stringFromAny(raw["kind"])
-	if kind != "already_reviewed_by_current_user" && kind != "self_authored" {
+	if kind != "already_reviewed_by_current_user" && kind != "self_authored" && kind != "not_requested" {
 		return false
 	}
 	headSHA, _ := stringFromAny(raw["headSha"])
@@ -4958,7 +4992,7 @@ func reviewerLastSkipNeedsCurrentLogin(meta map[string]any, pr PullRequestSummar
 
 func isDiscoverySuppressingSkipKind(kind string) bool {
 	switch kind {
-	case "conflicted", "already_reviewed_by_current_user", "already_published_head", "draft", "approved", "ready_label", "self_authored":
+	case "conflicted", "already_reviewed_by_current_user", "already_published_head", "draft", "approved", "ready_label", "self_authored", "not_requested":
 		return true
 	default:
 		return false
@@ -5247,6 +5281,9 @@ func filterSkipMetadata(checkpoint reviewerCheckpoint, recordedAt string) map[st
 	}
 	if checkpoint.SkipKind == "already_reviewed_by_current_user" && checkpoint.SkipReviewerLogin != "" {
 		metadata["reviewerLogin"] = normalizeLogin(checkpoint.SkipReviewerLogin)
+	}
+	if checkpoint.SkipKind == "not_requested" && checkpoint.Detail.CurrentLogin != "" {
+		metadata["reviewerLogin"] = normalizeLogin(checkpoint.Detail.CurrentLogin)
 	}
 	if checkpoint.SkipKind == "self_authored" {
 		if author := normalizeLogin(checkpoint.Detail.Author); author != "" {
